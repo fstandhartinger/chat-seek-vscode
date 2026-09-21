@@ -1,0 +1,73 @@
+{
+  "name": "chat-seek",
+  "displayName": "Chat Seek",
+  "description": "Find the Claude Code, Codex, and OpenCode conversation you remember describing.",
+  "version": "0.1.0",
+  "publisher": "fstandhartinger",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:chatSeek.search",
+    "onCommand:chatSeek.rebuildIndex"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "chatSeek.search",
+        "title": "Chat Seek: Search past AI chats"
+      },
+      {
+        "command": "chatSeek.rebuildIndex",
+        "title": "Chat Seek: Rebuild chat index"
+      }
+    ],
+    "configuration": {
+      "title": "Chat Seek",
+      "properties": {
+        "chatSeek.extraRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional Claude, Codex, or OpenCode history roots, including Windows mounts."
+        },
+        "chatSeek.useLaya": {
+          "type": "boolean",
+          "default": true,
+          "description": "Rerank search results with a local Laya model. First use downloads about 1.7 GB of model weights."
+        },
+        "chatSeek.maxRerank": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Maximum candidate messages scored by Laya per search."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "package": "vsce package --target linux-x64",
+    "lint": "node --check src/extension.js && node --check src/indexer.js && node --check src/search.js && node --check src/webview.js"
+  },
+  "dependencies": {
+    "@receptron/laya": "^0.1.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "@types/vscode": "^1.90.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fstandhartinger/chat-seek-vscode.git"
+  }
+}

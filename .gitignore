@@ -1,0 +1,13 @@
+node_modules/
+*.vsix
+.cache/
+coverage/
+.DS_Store
+demo/frames/
+demo/out/
+demo/ui.html
+demo/smoke.png
+demo/palette.png
+
+
+INTERNAL.md
