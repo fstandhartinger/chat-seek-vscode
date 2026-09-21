@@ -11,3 +11,6 @@ node_modules/onnxruntime-node/bin/napi-v6/linux/x64/libonnxruntime_providers_ten
 media/*.mp4
 media/*.gif
 .gitignore
+
+INTERNAL.md
+.env*

@@ -2,11 +2,11 @@
   "name": "chat-seek",
   "displayName": "Chat Seek",
   "description": "Find the Claude Code, Codex, and OpenCode conversation you remember describing.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "fstandhartinger",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0",
+    "vscode": "^1.99.0",
     "node": ">=20"
   },
   "categories": [
@@ -14,7 +14,9 @@
   ],
   "activationEvents": [
     "onCommand:chatSeek.search",
-    "onCommand:chatSeek.rebuildIndex"
+    "onCommand:chatSeek.rebuildIndex",
+    "onView:chatSeek.sidebar",
+    "onCommand:chatSeek.configureSummaries"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -26,6 +28,10 @@
       {
         "command": "chatSeek.rebuildIndex",
         "title": "Chat Seek: Rebuild chat index"
+      },
+      {
+        "command": "chatSeek.configureSummaries",
+        "title": "Chat Seek: Configure summaries"
       }
     ],
     "configuration": {
@@ -50,14 +56,81 @@
           "minimum": 1,
           "maximum": 30,
           "description": "Maximum candidate messages scored by Laya per search."
+        },
+        "chatSeek.summaries.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Send sampled chat excerpts to configured providers for cached one-sentence summaries. API charges and provider data policies apply."
+        },
+        "chatSeek.summaries.provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "openai",
+            "openrouter",
+            "tensorx",
+            "custom"
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "description": "Auto tries only configured providers: OpenAI, OpenRouter, TensorX, custom. Select one provider to disable cross-provider fallback."
+        },
+        "chatSeek.summaries.openaiModel": {
+          "type": "string",
+          "default": "gpt-4.1-nano",
+          "scope": "machine",
+          "description": "Model ID for openai chat summaries."
+        },
+        "chatSeek.summaries.openrouterModel": {
+          "type": "string",
+          "default": "openai/gpt-4.1-nano",
+          "scope": "machine",
+          "description": "Model ID for openrouter chat summaries."
+        },
+        "chatSeek.summaries.tensorxModel": {
+          "type": "string",
+          "default": "z-ai/glm-5.3-flash",
+          "scope": "machine",
+          "description": "Model ID for tensorx chat summaries."
+        },
+        "chatSeek.summaries.customModel": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Model ID for custom chat summaries."
+        },
+        "chatSeek.summaries.customUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "OpenAI-compatible base URL ending in /v1. HTTPS required except localhost."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "chatSeek",
+          "title": "Chat Seek",
+          "icon": "media/search.svg"
+        }
+      ]
+    },
+    "views": {
+      "chatSeek": [
+        {
+          "id": "chatSeek.sidebar",
+          "name": "Search chats",
+          "type": "webview"
+        }
+      ]
     }
   },
   "scripts": {
     "test": "node --test test/*.test.js",
     "package": "vsce package --target linux-x64",
-    "lint": "node --check src/extension.js && node --check src/indexer.js && node --check src/search.js && node --check src/webview.js"
+    "lint": "node --check src/extension.js && node --check src/indexer.js && node --check src/search.js && node --check src/webview.js && node --check src/summaries.js && node --check src/presentation.js"
   },
   "dependencies": {
     "@receptron/laya": "^0.1.1"
@@ -69,5 +142,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/fstandhartinger/chat-seek-vscode.git"
-  }
+  },
+  "extensionKind": [
+    "workspace"
+  ]
 }

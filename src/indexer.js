@@ -50,14 +50,17 @@ async function parseJsonl(file, source) {
   const result = [];
   const stream = fs.createReadStream(file, { encoding: 'utf8', highWaterMark: 128 * 1024 });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let cwd = null;
   let line = 0, title = '', session = path.basename(file, '.jsonl').replace(/^rollout-/, '');
   try {
     for await (const raw of lines) {
       line++;
-      if (source === 'Codex' && !raw.includes('"type":"response_item"') && !raw.includes('"type": "response_item"')) continue;
+      if (source === 'Codex' && !raw.includes('"type":"response_item"') && !raw.includes('"type": "response_item"') && !raw.includes('"session_meta"')) continue;
       if (source === 'Claude Code' && !raw.includes('"type":"user"') && !raw.includes('"type":"assistant"')) continue;
       let d;
       try { d = JSON.parse(raw); } catch { continue; }
+      if (source === 'Codex' && d.type === 'session_meta') { session = d.payload?.id || d.payload?.session_id || session; cwd = d.payload?.cwd || cwd; continue; }
+      cwd = d.cwd || cwd;
       const message = source === 'Claude Code' ? parseClaude(d) : parseCodex(d);
       if (!message) continue;
       if (message.session) session = message.session;
@@ -66,7 +69,7 @@ async function parseJsonl(file, source) {
       if (result.length % 500 === 0) await new Promise(resolve => setImmediate(resolve));
     }
   } finally { lines.close(); stream.destroy(); }
-  for (const r of result) r.title = title;
+  for (const r of result) { r.title = title; r.cwd = cwd; r.session = session; }
   return result;
 }
 async function parseOpenCode(storage) {
@@ -78,7 +81,7 @@ async function parseOpenCode(storage) {
   const messages = new Map();
   for await (const file of walk(path.join(storage, 'message'))) {
     if (!file.endsWith('.json')) continue;
-    try { const d = JSON.parse(await fsp.readFile(file, 'utf8')); messages.set(d.id, { ...d, path: file }); } catch { /* malformed */ }
+    try { const d = JSON.parse(await fsp.readFile(file, 'utf8')); messages.set(d.id, d); } catch { /* malformed */ }
   }
   const records = [];
   for await (const file of walk(path.join(storage, 'part'))) {
@@ -91,7 +94,7 @@ async function parseOpenCode(storage) {
     const s = sessions.get(d.sessionID);
     const text = trimText(d.text);
     if (!text) continue;
-    records.push({ source: 'OpenCode', path: file, session: d.sessionID, line: 1, role: m.role, text, title: s?.title || '', time: m.time?.created || s?.time?.updated || null });
+    records.push({ source: 'OpenCode', cwd: s?.directory || m.path?.cwd || null, path: file, session: d.sessionID, line: 1, role: m.role, text, title: s?.title || '', time: m.time?.created || s?.time?.updated || null });
   }
   records.sort((a, b) => (a.time || 0) - (b.time || 0));
   const lines = new Map();
@@ -105,7 +108,7 @@ async function parseOpenCode(storage) {
 class ChatIndex {
   constructor(cachePath) { this.cachePath = cachePath; this.records = []; this.manifest = {}; }
   async load() {
-    try { const d = JSON.parse(await fsp.readFile(this.cachePath, 'utf8')); this.records = d.records || []; this.manifest = d.manifest || {}; } catch { /* first run */ }
+    try { const d = JSON.parse(await fsp.readFile(this.cachePath, 'utf8')); this.records = d.records || []; this.manifest = d.version === 2 ? d.manifest || {} : {}; } catch { /* first run */ }
   }
   async rebuild(roots, onProgress = () => {}) {
     const next = [], manifest = {};
@@ -134,7 +137,7 @@ class ChatIndex {
     this.manifest = manifest;
     await fsp.mkdir(path.dirname(this.cachePath), { recursive: true });
     const temp = `${this.cachePath}.tmp`;
-    await fsp.writeFile(temp, JSON.stringify({ records: next, manifest }), { mode: 0o600 });
+    await fsp.writeFile(temp, JSON.stringify({ version: 2, records: next, manifest }), { mode: 0o600 });
     await fsp.rename(temp, this.cachePath);
     return next.length;
   }
