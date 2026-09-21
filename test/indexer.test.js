@@ -40,8 +40,10 @@ test('OpenCode joins session, message, and text part', async t => {
   fs.writeFileSync(path.join(dir, 'session/x/s1.json'), JSON.stringify({ id: 's1', title: 'Build a router' }));
   fs.writeFileSync(path.join(dir, 'message/s1/m1.json'), JSON.stringify({ id: 'm1', role: 'user' }));
   fs.writeFileSync(path.join(dir, 'part/m1/p1.json'), JSON.stringify({ sessionID: 's1', messageID: 'm1', type: 'text', text: 'Use Laya to choose a model.' }));
+  fs.writeFileSync(path.join(dir, 'part/m1/p2.json'), JSON.stringify({ sessionID: 's1', messageID: 'm1', type: 'text', text: 'Then compare costs.' }));
   const records = await parseOpenCode(dir);
-  assert.equal(records.length, 1);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map(x => x.line), [1, 2]);
   assert.equal(records[0].title, 'Build a router');
   assert.equal(records[0].text, 'Use Laya to choose a model.');
 });

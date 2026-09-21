@@ -91,7 +91,14 @@ async function parseOpenCode(storage) {
     const s = sessions.get(d.sessionID);
     const text = trimText(d.text);
     if (!text) continue;
-    records.push({ source: 'OpenCode', path: file, session: d.sessionID, line: 1, role: m.role, text, title: s?.title || '', time: s?.time?.updated || m.time?.created || null });
+    records.push({ source: 'OpenCode', path: file, session: d.sessionID, line: 1, role: m.role, text, title: s?.title || '', time: m.time?.created || s?.time?.updated || null });
+  }
+  records.sort((a, b) => (a.time || 0) - (b.time || 0));
+  const lines = new Map();
+  for (const record of records) {
+    const line = (lines.get(record.session) || 0) + 1;
+    lines.set(record.session, line);
+    record.line = line;
   }
   return records;
 }

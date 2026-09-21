@@ -6,18 +6,30 @@ const { ChatIndex, homeRoots } = require('./indexer');
 const { lexicalSearch, groupBySession, rerankWithLaya } = require('./search');
 const { html } = require('./webview');
 
-let panel, index, modelPromise, latestQuery = 0;
+let panel, index, indexInitPromise, rebuildPromise, modelPromise, latestQuery = 0;
 function roots() {
   const extra = vscode.workspace.getConfiguration('chatSeek').get('extraRoots', []);
   return [...homeRoots(), ...extra.map(p => ({ source: /opencode/i.test(p) ? 'OpenCode' : /codex/i.test(p) ? 'Codex' : 'Claude Code', path: p.replace(/^~/, require('node:os').homedir()) }))];
 }
 function post(message) { if (panel) panel.webview.postMessage(message); }
 async function ensureIndex(context, force = false) {
-  if (!index) { index = new ChatIndex(path.join(context.globalStorageUri.fsPath, 'index.json')); await index.load(); }
+  if (!indexInitPromise) {
+    index = new ChatIndex(path.join(context.globalStorageUri.fsPath, 'index.json'));
+    indexInitPromise = index.load();
+  }
+  await indexInitPromise;
   if (force || !index.records.length) {
-    const count = await index.rebuild(roots(), text => post({ type: 'status', text }));
+    if (!rebuildPromise) {
+      rebuildPromise = index.rebuild(roots(), text => post({ type: 'status', text }))
+        .finally(() => { rebuildPromise = null; });
+    }
+    const count = await rebuildPromise;
     post({ type: 'status', text: `Indexed ${count.toLocaleString()} messages from Claude Code, Codex, and OpenCode.` });
-  } else post({ type: 'status', text: `Ready: ${index.records.length.toLocaleString()} local messages. Run “Chat Seek: Rebuild chat index” to include newer chats.` });
+  } else if (rebuildPromise) {
+    await rebuildPromise;
+  } else {
+    post({ type: 'status', text: `Ready: ${index.records.length.toLocaleString()} local messages.` });
+  }
   return index;
 }
 async function getModel() {
@@ -71,7 +83,7 @@ function activate(context) {
         await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
       }
     });
-    await ensureIndex(context);
+    await ensureIndex(context, true);
   }));
   context.subscriptions.push(vscode.commands.registerCommand('chatSeek.rebuildIndex', async () => { await ensureIndex(context, true); vscode.window.showInformationMessage(`Chat Seek indexed ${index.records.length.toLocaleString()} messages.`); }));
 }

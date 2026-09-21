@@ -17,13 +17,13 @@ npm install
 npm run package
 ```
 
-In VS Code, run **Extensions: Install from VSIX...** and select the generated `chat-seek-0.1.0.vsix`. Run **Chat Seek: Search past AI chats** from the Command Palette.
+In VS Code, run **Extensions: Install from VSIX...** and select the generated `chat-seek-linux-x64-0.1.1.vsix`. Run **Chat Seek: Search past AI chats** from the Command Palette.
 
 The packaged VSIX targets Linux x64. To build for another platform, install the dependencies on that platform and adjust the packaging target and `.vscodeignore` native-binary exclusions.
 
-The first search builds a local index in VS Code's private extension storage. The first Laya search downloads roughly 1.7 GB of model weights to `~/.cache/receptron-laya`; subsequent rankings stay local. A search displays keyword results first, then updates the order when Laya finishes. If the model cannot load, keyword results remain usable. Set `chatSeek.useLaya` to `false` for keyword-only search.
+Opening Chat Seek builds or refreshes a local index in VS Code's private extension storage. The first Laya search downloads roughly 1.7 GB of model weights to `~/.cache/receptron-laya`; subsequent rankings stay local. A search displays keyword results first, then updates the order when Laya finishes. If the model cannot load, keyword results remain usable. Set `chatSeek.useLaya` to `false` for keyword-only search.
 
-Run **Chat Seek: Rebuild chat index** to include new conversations. Changed transcript files are rescanned; unchanged files are loaded from the private index.
+Run **Chat Seek: Rebuild chat index** for a manual refresh while the search panel is open. Changed transcript files are rescanned; unchanged files are loaded from the private index.
 
 ## Supported history
 
