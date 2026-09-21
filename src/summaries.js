@@ -3,8 +3,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const PROVIDERS = {
-  openai: { label: 'OpenAI', url: 'https://api.openai.com/v1', model: 'gpt-4.1-nano', env: ['OPENAI_API_KEY'] },
-  openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4.1-nano', env: ['OPENROUTER_API_KEY', 'OPEN_ROUTER_API_KEY'] },
+  openai: { label: 'OpenAI', url: 'https://api.openai.com/v1', model: 'gpt-5.6-luna', env: ['OPENAI_API_KEY'] },
+  openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-5.6-luna', env: ['OPENROUTER_API_KEY', 'OPEN_ROUTER_API_KEY'] },
   tensorx: { label: 'TensorX', url: 'https://api.tensorx.ai/v1', model: 'z-ai/glm-5.3-flash', env: ['TENSORX_API_KEY'] },
   custom: { label: 'Custom', url: '', model: '', env: ['CHAT_SEEK_API_KEY'] }
 };

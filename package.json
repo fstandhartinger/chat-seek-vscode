@@ -2,7 +2,7 @@
   "name": "chat-seek",
   "displayName": "Chat Seek",
   "description": "Find the Claude Code, Codex, and OpenCode conversation you remember describing.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "fstandhartinger",
   "license": "MIT",
   "engines": {
@@ -78,13 +78,13 @@
         },
         "chatSeek.summaries.openaiModel": {
           "type": "string",
-          "default": "gpt-4.1-nano",
+          "default": "gpt-5.6-luna",
           "scope": "machine",
           "description": "Model ID for openai chat summaries."
         },
         "chatSeek.summaries.openrouterModel": {
           "type": "string",
-          "default": "openai/gpt-4.1-nano",
+          "default": "openai/gpt-5.6-luna",
           "scope": "machine",
           "description": "Model ID for openrouter chat summaries."
         },

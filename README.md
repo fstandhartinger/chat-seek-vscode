@@ -26,14 +26,14 @@ In `auto` mode, Chat Seek tries only providers with a key and model configured, 
 
 | Provider | Environment variables | Default model |
 | --- | --- | --- |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4.1-nano` |
-| OpenRouter | `OPENROUTER_API_KEY` or `OPEN_ROUTER_API_KEY` | `openai/gpt-4.1-nano` |
+| OpenAI | `OPENAI_API_KEY` | `gpt-5.6-luna` |
+| OpenRouter | `OPENROUTER_API_KEY` or `OPEN_ROUTER_API_KEY` | `openai/gpt-5.6-luna` |
 | TensorX | `TENSORX_API_KEY` | `z-ai/glm-5.3-flash` |
 | Custom OpenAI-compatible endpoint | `CHAT_SEEK_API_KEY` | Set your model and base URL |
 
 SecretStorage keys take precedence over environment keys for the same provider. Removing a stored key does not remove an environment key. VS Code must inherit environment variables; reload/restart the relevant local or remote extension host if new variables are not visible. Never put keys in committed settings, prompts, screenshots, or this repository.
 
-Override models under `chatSeek.summaries.<provider>Model`. For example, use `gpt-5.6-luna` or `openai/gpt-5.6-luna` when available to your provider account; GPT-5/6 overrides request low reasoning. The default nano model is inexpensive and avoids a reasoning step for this small task. Model availability and prices can change—check your provider.
+Override models under `chatSeek.summaries.<provider>Model`. For example, use `gpt-5.6-luna` or `openai/gpt-5.6-luna` when available to your provider account; GPT-5/6 overrides request low reasoning. The default GPT-5.6 Luna model requests low reasoning for short summaries. Model availability and prices can change—check your provider.
 
 For other providers or a local server, set `chatSeek.summaries.provider` to `custom`, `chatSeek.summaries.customUrl` to the OpenAI-compatible base URL (for example `https://your-provider.example/v1`), and `chatSeek.summaries.customModel` to its exact model ID. HTTPS is required except for localhost. Add the custom key via Configure summaries or `CHAT_SEEK_API_KEY`.
 
@@ -52,7 +52,7 @@ npm ci
 npm test
 npm run lint
 npm run package
-code --install-extension chat-seek-linux-x64-0.2.0.vsix --force
+code --install-extension chat-seek-linux-x64-0.2.1.vsix --force
 ```
 
 Use `code-insiders` for VS Code Insiders. In a remote window, install into the environment containing the histories, not just the local UI host. Building for another platform requires changing the `vsce --target` argument and `.vscodeignore` ONNX native-binary exclusions to retain that platform's runtime. The supplied VSIX must not be relabeled for another platform.
