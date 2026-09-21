@@ -33,7 +33,7 @@ async function ensureIndex(context, force = false) {
   return index;
 }
 async function getModel() {
-  if (!modelPromise) modelPromise = import('@receptron/laya').then(({ Laya }) => Laya.load({ executionProviders: ['cpu'], sessionOptions: { intraOpNumThreads: 2 } })).catch(err => { modelPromise = null; throw err; });
+  if (!modelPromise) modelPromise = import('@receptron/laya').then(({ Laya }) => Laya.load({ executionProviders: ['cpu'], sessionOptions: { intraOpNumThreads: 4 } })).catch(err => { modelPromise = null; throw err; });
   return modelPromise;
 }
 async function search(context, query) {

@@ -2,7 +2,7 @@
   "name": "chat-seek",
   "displayName": "Chat Seek",
   "description": "Find the Claude Code, Codex, and OpenCode conversation you remember describing.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "fstandhartinger",
   "license": "MIT",
   "engines": {

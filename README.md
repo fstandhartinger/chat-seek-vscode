@@ -17,7 +17,7 @@ npm install
 npm run package
 ```
 
-In VS Code, run **Extensions: Install from VSIX...** and select the generated `chat-seek-linux-x64-0.1.1.vsix`. Run **Chat Seek: Search past AI chats** from the Command Palette.
+In VS Code, run **Extensions: Install from VSIX...** and select the generated `chat-seek-linux-x64-0.1.2.vsix`. Run **Chat Seek: Search past AI chats** from the Command Palette.
 
 The packaged VSIX targets Linux x64. To build for another platform, install the dependencies on that platform and adjust the packaging target and `.vscodeignore` native-binary exclusions.
 

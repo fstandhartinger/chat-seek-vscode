@@ -62,7 +62,7 @@ async function rerankWithLaya(items, query, model, max = 12) {
   }
   for (const item of chosen) {
     const result = await model.systemOne(
-      { search: query.slice(0, 500), candidate: focusExcerpt(item.record.text, query, 900) },
+      { search: query.slice(0, 500), candidate: focusExcerpt(item.record.text, query, 550) },
       { match: { type: 'score', instructions: 'How well does candidate match the remembered chat described in search?', criteria: ['Unrelated to the search description', 'Only a passing mention of the topic', 'Discusses the same project or task', 'Direct evidence this is the conversation being sought'] } }
     );
     const semantic = result?.answers?.match?.score;
