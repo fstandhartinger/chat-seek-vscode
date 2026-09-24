@@ -4,6 +4,7 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const crypto = require('node:crypto');
 const { timestamp } = require('./presentation');
 const { redact } = require('./summaries');
 const { lexicalSearch, terms } = require('./search');
@@ -383,37 +384,75 @@ async function extractAnswer(query, excerpt, providers, signal, fetcher = fetch)
 
 async function scanQuestions(groups, query, model, providers, signal, onProgress, onResult, extractor = extractAnswer, options = {}) {
   const budget = chunkBudget(model, query);
-  let chats = 0, chunks = 0, quickChunks = 0, found = 0;
+  let chats = 0, chunks = 0, quickChunks = 0, found = 0, pending = 0, phase = 'quick';
   let answerProviders = providers;
-  const seenCitations = new Set();
-  async function consider(group, excerpt, line, phase) {
-    if (phase === 'quick') quickChunks++; else chunks++;
-    const judgment = await model.systemOne(excerpt, { answer: evidenceQuestion(query) });
-    if ((judgment.answers?.answer?.noul || 0) >= 0.78) {
-      let extraction = null;
-      if (answerProviders.length) {
-        onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found, extracting: true });
-        try { extraction = await extractor(query, excerpt, answerProviders, signal); }
-        catch (err) {
-          if (signal?.aborted) throw err;
-          answerProviders = [];
-          onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found, error: `Answer provider failed (${err.message}); continuing local scan.` });
-        }
-      }
-      const citationKey = extraction ? `${group.key}\0${extraction.citation}` : '';
-      if ((extraction || !answerProviders.length) && (!citationKey || !seenCitations.has(citationKey))) {
-        if (citationKey) seenCitations.add(citationKey);
+  const seenCitations = new Set(), seenChunks = new Set();
+  const queued = [], running = new Set();
+  const progress = extra => onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found, pending, ...extra });
+  async function finishCandidate(task) {
+    const { group, excerpt, id } = task;
+    try {
+      if (signal?.aborted) return;
+      if (!answerProviders.length) {
         found++;
-        await onResult({ mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line, chunk: excerpt, ...extraction });
+        await options.onUpdate?.(id, { verification: 'unavailable' });
+        return;
       }
+      const extraction = await extractor(query, excerpt, answerProviders, signal);
+      if (signal?.aborted) return;
+      if (!extraction) { await options.onRemove?.(id); return; }
+      const citationKey = `${group.key}\0${extraction.citation}`;
+      if (seenCitations.has(citationKey)) { await options.onRemove?.(id); return; }
+      seenCitations.add(citationKey);
+      found++;
+      await options.onUpdate?.(id, { ...extraction, verification: 'verified' });
+    } catch (err) {
+      if (!signal?.aborted) {
+        answerProviders = [];
+        found++;
+        await options.onUpdate?.(id, { verification: 'unavailable' });
+        progress({ error: `Answer provider failed (${err.message}); continuing local scan.` });
+      }
+    } finally {
+      if (signal?.aborted) await options.onRemove?.(id);
+      pending--;
+      progress();
     }
-    const n = phase === 'quick' ? quickChunks : chunks;
-    if (n <= 5 || n % 10 === 0 || found && n % 5 === 0) onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found });
+  }
+  function pump() {
+    while (queued.length && running.size < 2) {
+      const task = queued.shift();
+      let work;
+      work = finishCandidate(task).finally(() => { running.delete(work); pump(); });
+      running.add(work);
+    }
+  }
+  async function consider(group, excerpt, line, pass) {
+    phase = pass;
+    if (pass === 'quick') quickChunks++; else chunks++;
+    const chunkKey = crypto.createHash('sha256').update(group.key).update('\0').update(excerpt).digest('hex');
+    if (seenChunks.has(chunkKey)) return;
+    seenChunks.add(chunkKey);
+    const judgment = await model.systemOne(excerpt, { answer: evidenceQuestion(query) });
+    if (signal?.aborted) return;
+    if ((judgment.answers?.answer?.noul || 0) >= 0.78) {
+      const item = { mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line, chunk: excerpt, verification: answerProviders.length ? 'pending' : 'unavailable' };
+      const id = await onResult(item);
+      if (answerProviders.length) {
+        pending++;
+        queued.push({ group, excerpt, id });
+        pump();
+        progress();
+        while (queued.length >= 8 && running.size && !signal?.aborted) await Promise.race(running);
+      } else found++;
+    }
+    const n = pass === 'quick' ? quickChunks : chunks;
+    if (n <= 5 || n % 10 === 0 || found && n % 5 === 0) progress();
   }
   if (options.records?.length && !signal?.aborted) {
-    onProgress({ phase: 'quick', chats, totalChats: groups.length, chunks, quickChunks, found });
+    progress();
     for await (const candidate of likelyOriginalChunks(options.records, groups, query, model, budget, signal,
-      (file, line) => onProgress({ phase: 'quick', chats, totalChats: groups.length, chunks, quickChunks, found, reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
+      (file, line) => progress({ reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
       if (signal?.aborted) break;
       await consider(candidate.group, candidate.text, candidate.line, 'quick');
     }
@@ -421,7 +460,8 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
   for (const group of groups) {
     if (signal?.aborted) break;
     try {
-      onProgress({ phase: 'full', chats, totalChats: groups.length, chunks, quickChunks, found, preparing: group.title || group.session });
+      phase = 'full';
+      progress({ preparing: group.title || group.session });
       for await (const part of reverseChatChunks(group, model, budget, signal)) {
         if (signal?.aborted) break;
         await consider(group, part.text, part.line, 'full');
@@ -430,10 +470,15 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
     } catch (err) {
       if (signal?.aborted) break;
       if (!['ENOENT', 'EACCES'].includes(err.code)) throw err;
-      onProgress({ phase: 'full', chats, totalChats: groups.length, chunks, quickChunks, found, error: `Skipped unavailable transcript: ${group.source} ${group.session}` });
+      progress({ error: `Skipped unavailable transcript: ${group.source} ${group.session}` });
     }
   }
-  onProgress({ phase: 'full', chats, totalChats: groups.length, chunks, quickChunks, found, done: !signal?.aborted });
+  if (signal?.aborted) {
+    for (const task of queued.splice(0)) { pending--; await options.onRemove?.(task.id); }
+  }
+  while (running.size) await Promise.all([...running]);
+  phase = 'full';
+  progress({ done: !signal?.aborted });
   return { chats, chunks, quickChunks, found };
 }
 module.exports = { isQuestion, evidenceQuestion, chunkBudget, splitAtBudget, fullContent, fullEntry, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyLines, likelyOriginalChunks, parseExtraction, extractAnswer, scanQuestions };

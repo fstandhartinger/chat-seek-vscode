@@ -16,11 +16,16 @@ const webviews = new Set();
 let summaryStore, summaryInit, summaryAbort, sessions = new Map(), currentItems = [];
 let panel, index, indexInitPromise, rebuildPromise, modelPromise, latestQuery = 0;
 let questionAbort, questionItems = new Map();
+let searchRunning = false, currentMode = 'chat', currentStatus = 'Loading local chats…';
 function roots() {
   const extra = vscode.workspace.getConfiguration('chatSeek').get('extraRoots', []);
   return [...homeRoots(), ...extra.map(p => ({ source: /opencode/i.test(p) ? 'OpenCode' : /codex/i.test(p) ? 'Codex' : 'Claude Code', path: p.replace(/^~/, require('node:os').homedir()) }))];
 }
-function post(message) { for (const view of webviews) view.postMessage(message); }
+function post(message) {
+  if (message.type === 'status') currentStatus = message.text;
+  if (message.type === 'mode') currentMode = message.mode;
+  for (const view of webviews) view.postMessage(message);
+}
 async function ensureIndex(context, force = false) {
   if (!indexInitPromise) {
     index = new ChatIndex(path.join(context.globalStorageUri.fsPath, 'index.json'));
@@ -53,6 +58,8 @@ async function getModel() {
 }
 async function search(context, query) {
   const turn = ++latestQuery;
+  searchRunning = true;
+  post({ type: 'searchRunning', running: true });
   summaryAbort?.abort();
   questionAbort?.abort();
   summaryAbort = new AbortController();
@@ -89,10 +96,10 @@ async function search(context, query) {
       post({ type: 'status', text: `${candidates.length} matching messages · top ${Math.min(max, candidates.length)} reranked locally with Laya` });
     } catch (err) { post({ type: 'status', text: `Keyword results shown. Laya unavailable: ${String(err.message || err).slice(0, 180)}` }); }
   } catch (err) { post({ type: 'status', text: `Indexing failed: ${String(err.message || err).slice(0, 220)}` }); }
-  finally { if (turn === latestQuery) post({ type: 'searchDone' }); }
+  finally { if (turn === latestQuery) { searchRunning = false; post({ type: 'searchDone' }); } }
 }
 async function searchQuestion(context, query, model, turn, signal) {
-  const ix = await ensureIndex(context, true);
+  const ix = await ensureIndex(context);
   if (turn !== latestQuery || signal.aborted) return;
   const groups = chatGroups(ix.records);
   questionItems.clear(); currentItems = [];
@@ -115,9 +122,10 @@ async function searchQuestion(context, query, model, turn, signal) {
       p => {
         if (turn !== latestQuery) return;
         if (p.error) post({ type: 'summaryStatus', text: p.error });
+        const pending = p.pending ? ` · ${p.pending.toLocaleString()} checking` : '';
         const text = p.phase === 'quick' && !p.done
-          ? `Checking likely original messages · ${p.quickChunks.toLocaleString()} chunks · ${p.found.toLocaleString()} results${p.reading ? ` · ${p.reading}` : ''}${p.extracting ? ' · extracting answer…' : ''}`
-          : `${p.done ? 'Finished' : signal.aborted ? 'Stopped' : 'Scanning full archive'} · ${p.chats.toLocaleString()}/${p.totalChats.toLocaleString()} chats complete · ${p.chunks.toLocaleString()} full-scan chunks · ${p.found.toLocaleString()} results${p.preparing ? ` · reading ${String(p.preparing).slice(0, 50)}` : ''}${p.extracting ? ' · extracting answer…' : ''}`;
+          ? `Checking likely original messages · ${p.quickChunks.toLocaleString()} chunks · ${p.found.toLocaleString()} results${pending}${p.reading ? ` · ${p.reading}` : ''}`
+          : `${p.done ? 'Finished' : signal.aborted ? 'Stopped' : 'Scanning full archive'} · ${p.chats.toLocaleString()}/${p.totalChats.toLocaleString()} chats complete · ${p.chunks.toLocaleString()} full-scan chunks · ${p.found.toLocaleString()} results${pending}${p.preparing ? ` · reading ${String(p.preparing).slice(0, 50)}` : ''}`;
         post({ type: 'status', text });
       },
       async item => {
@@ -127,7 +135,24 @@ async function searchQuestion(context, query, model, turn, signal) {
         questionItems.set(id, full);
         currentItems.push(full);
         post({ type: 'questionResult', item: full });
-      }, undefined, { records: ix.records });
+        return id;
+      }, undefined, {
+        records: ix.records,
+        onUpdate: (id, changes) => {
+          if (turn !== latestQuery || signal.aborted) return;
+          const item = questionItems.get(id);
+          if (!item) return;
+          Object.assign(item, changes);
+          if (changes.verification === 'verified') currentItems = [item, ...currentItems.filter(x => x.id !== id)];
+          post({ type: 'questionUpdate', id, item });
+        },
+        onRemove: id => {
+          if (turn !== latestQuery) return;
+          questionItems.delete(id);
+          currentItems = currentItems.filter(x => x.id !== id);
+          post({ type: 'questionRemove', id });
+        }
+      });
   } catch (err) { if (turn === latestQuery && !signal.aborted) post({ type: 'status', text: `Question scan stopped: ${String(err.message || err).slice(0, 220)}` }); }
 }
 function openConversation(key, line) {
@@ -232,7 +257,13 @@ function wireView(context, webview) {
   webviews.add(webview); webview.html = html(crypto.randomBytes(16).toString('hex'));
   return webview.onDidReceiveMessage(async m => {
     try {
-      if (m.type === 'ready') { await ensureIndex(context, true); if (currentItems.length) await publishResults(context, currentItems); }
+      if (m.type === 'ready') {
+        webview.postMessage({ type: 'results', items: currentItems });
+        webview.postMessage({ type: 'mode', mode: currentMode });
+        webview.postMessage({ type: 'status', text: currentStatus });
+        webview.postMessage({ type: 'searchRunning', running: searchRunning });
+        if (!searchRunning) await ensureIndex(context, true);
+      }
       if (m.type === 'search' && typeof m.query === 'string') await search(context, m.query.slice(0, 500));
       if (m.type === 'stop') { questionAbort?.abort(); post({ type: 'status', text: 'Question scan stopped.' }); }
       if (m.type === 'configure') await configureSummaries(context);

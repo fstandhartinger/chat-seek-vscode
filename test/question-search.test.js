@@ -100,3 +100,52 @@ test('answer extraction validates exact citation and falls back after provider e
   assert.equal(calls, 2);
   assert.equal(parseExtraction('{"answerable":true,"answer":"12 March","quote":"not in excerpt"}', 'It launched on 12 March.'), null);
 });
+test('question scan keeps checking chunks while two answers are extracted and removes rejected candidates', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-progressive-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const groups = [];
+  for (let i = 0; i < 2; i++) {
+    const file = path.join(dir, `${i}.jsonl`);
+    await fs.writeFile(file, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: `violet comet answer ${i}` } }));
+    groups.push({ key: `Claude Code:${i}`, source: 'Claude Code', session: String(i), title: String(i), time: i, records: [{ path: file, line: 1, time: String(i) }] });
+  }
+  const waiting = [], shown = [], updates = [], removed = [];
+  let reachedTwo;
+  const twoShown = new Promise(resolve => { reachedTwo = resolve; });
+  const scan = scanQuestions(groups, 'What was the answer?', model, [{ label: 'test' }], new AbortController().signal,
+    () => {}, item => { const id = shown.length; shown.push(item); if (shown.length === 2) reachedTwo(); return id; },
+    () => new Promise(resolve => waiting.push(resolve)),
+    { onUpdate: (id, update) => updates.push({ id, update }), onRemove: id => removed.push(id) });
+  await twoShown;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(waiting.length, 2, 'two extraction calls run while scanning continues');
+  assert.equal(updates.length, 0, 'early chunks are visibly provisional');
+  waiting[1]({ answer: 'Answer 1', citation: 'answer 1', provider: 'test' });
+  waiting[0](null);
+  const result = await scan;
+  assert.equal(result.chats, 2);
+  assert.equal(result.found, 1);
+  assert.deepEqual(updates.map(x => x.id), [1]);
+  assert.equal(updates[0].update.verification, 'verified');
+  assert.deepEqual(removed, [0]);
+});
+test('stopping a question scan removes provisional answers', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-cancel-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chat.jsonl');
+  await fs.writeFile(file, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'violet comet' } }));
+  const group = { key: 'Claude Code:test', source: 'Claude Code', session: 'test', records: [{ path: file, line: 1, time: '2026-01-01' }] };
+  const controller = new AbortController(), removed = [];
+  let extractionStarted;
+  const started = new Promise(resolve => { extractionStarted = resolve; });
+  const scan = scanQuestions([group], 'What was the answer?', model, [{ label: 'test' }], controller.signal,
+    () => {}, () => 'candidate', (_, __, ___, signal) => new Promise((resolve, reject) => {
+      extractionStarted();
+      signal.addEventListener('abort', () => reject(new Error('Cancelled')), { once: true });
+    }), { onRemove: id => removed.push(id) });
+  await started;
+  controller.abort();
+  const result = await scan;
+  assert.equal(result.found, 0);
+  assert.deepEqual(removed, ['candidate']);
+});

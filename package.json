@@ -2,7 +2,7 @@
   "name": "chat-seek",
   "displayName": "Chat Seek",
   "description": "Find Claude Code, Codex, and OpenCode chats or ask questions about their contents.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "fstandhartinger",
   "license": "MIT",
   "engines": {

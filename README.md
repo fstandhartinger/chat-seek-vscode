@@ -10,7 +10,7 @@ Find past **Claude Code, Codex, and OpenCode** conversations from a description,
 
 Chat Seek searches local user and assistant messages, then uses the [Laya local decision model](https://github.com/receptron/laya) to rerank likely matches. Optional one-sentence AI descriptions help you recognize a chat. Cards show its last activity (“1 week ago”), with the exact date on hover, a readable excerpt, and a **Resume in Claude Code / Codex / OpenCode** action.
 
-For factual questions, Chat Seek asks Laya to identify the intent, then checks likely **original messages** selected with the keyword index. This is a quick pass for early results, not a filter: the full pass still reads every supported chat from the newest chat and newest chunk onward. Each overlapping chunk fits the loaded Laya checkpoint's token limit. Matching chunks appear as the scan progresses. With answer extraction enabled, a configured LLM writes a concise answer and supplies a quote that Chat Seek verifies as an exact substring of the original chunk. Expand **Read full original chunk**, open it in an editor, or resume the chat. Use **Stop** once you have your answer or want to end a long scan.
+For factual questions, Chat Seek asks Laya to identify the intent, then checks likely **original messages** selected with the keyword index. This is a quick pass for early results, not a filter: the full pass still reads every supported chat from the newest chat and newest chunk onward. Each overlapping chunk fits the loaded Laya checkpoint's token limit. Matching chunks appear immediately as provisional cards. Up to two answer extraction requests run while Laya keeps scanning; verified answers move to the top with an exact quote, and rejected candidates disappear. Expand **Read full original chunk**, open it in an editor, or resume the chat. The scan continues if you close the search view and restores progress when you reopen it. Use **Stop** once you have your answer or want to end a long scan.
 
 ## How indexing and normal search work
 
@@ -19,7 +19,7 @@ For factual questions, Chat Seek asks Laya to identify the intent, then checks l
 3. **Find likely messages.** Normal search splits the description into words, scores word overlap and early/exact matches across indexed messages, and keeps the top 80 messages. Laya runs locally on a small subset (eight by default), reranks them, and Chat Seek groups them into up to 30 chat results. This is why ordinary search is quick, but can miss text beyond the 2,800-character cutoff or chats with no overlapping words.
 4. **Show the chat.** Each card shows a matching indexed excerpt, relative date, and an action to read nearby indexed messages or resume the original session. Optional one-sentence summaries are generated from sampled excerpts through your configured provider and cached locally; they are separate from indexing and off by default.
 
-Question mode uses the index only to choose promising *original* messages for the quick pass. It rereads those messages from source files, then streams the whole archive in overlapping full-text chunks. On a large archive, the complete Laya pass can take many hours; the quick pass and chunk counter let useful results appear earlier and make progress visible.
+Question mode uses the index only to choose promising *original* messages for the quick pass. It rereads those messages from source files, then streams the whole archive in overlapping full-text chunks. On a large archive, the complete Laya pass can take many hours; the quick pass, provisional cards, and chunk counter let useful results appear earlier and make progress visible. The answer queue holds at most eight waiting chunks plus two active requests; if it fills, the scan waits until a request completes. Laya itself runs one chunk at a time on the CPU because parallel CPU calls did not improve throughput in local measurements.
 
 ## Open and pin Chat Seek
 
@@ -65,7 +65,7 @@ npm ci
 npm test
 npm run lint
 npm run package
-code --install-extension chat-seek-linux-x64-0.3.1.vsix --force
+code --install-extension chat-seek-linux-x64-0.3.2.vsix --force
 ```
 
 Use `code-insiders` for VS Code Insiders. In a remote window, install into the environment containing the histories, not just the local UI host. Building for another platform requires changing the `vsce --target` argument and `.vscodeignore` ONNX native-binary exclusions to retain that platform's runtime. The supplied VSIX must not be relabeled for another platform.
