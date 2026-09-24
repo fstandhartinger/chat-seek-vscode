@@ -1,0 +1,5 @@
+Chat Seek starts with local transcript files from Claude Code, Codex, and OpenCode. It builds a private index: chat ID, time, source path, and up to twenty-eight hundred characters of each indexed message. On refresh, unchanged files are reused.
+
+In normal search, your words are compared with that index. Messages get a word-overlap score. The best eighty form a shortlist. Local Laya reranks a few, and Chat Seek groups them into conversations. Optional one-sentence summaries help you recognize a result.
+
+A factual question takes another route. Chat Seek first checks likely original messages, so an answer can appear sooner. Then it scans every original transcript in overlapping chunks sized for Laya. When a chunk answers the question, a small language model writes a sentence, and Chat Seek verifies its quote against the original text. You can open the chunk or resume the chat.

@@ -6,11 +6,20 @@ Find past **Claude Code, Codex, and OpenCode** conversations from a description,
 
 ![Chat Seek demo](media/demo.gif)
 
-[Demo video](media/demo.mp4) · [Narrated explainer](media/explainer.mp4). These videos show the original UI with illustrative excerpts; the current version also has dates, summaries, and resume actions.
+[Demo video](media/demo.mp4) · [How indexing and search work (narrated)](media/search-explainer.mp4) · [Original explainer](media/explainer.mp4). All videos use illustrative data.
 
 Chat Seek searches local user and assistant messages, then uses the [Laya local decision model](https://github.com/receptron/laya) to rerank likely matches. Optional one-sentence AI descriptions help you recognize a chat. Cards show its last activity (“1 week ago”), with the exact date on hover, a readable excerpt, and a **Resume in Claude Code / Codex / OpenCode** action.
 
-For factual questions, Chat Seek asks Laya to identify the intent, then reads the **original transcript files** one chat at a time, newest chat and newest chunk first. Each chunk overlaps the next and fits the loaded Laya checkpoint's token limit. Laya checks every chunk; it does not use the clipped keyword index or a shortlist for this mode. Matching chunks appear as the scan progresses. With answer extraction enabled, a configured LLM writes a concise answer and supplies a quote that Chat Seek verifies as an exact substring of the original chunk. Expand **Read full original chunk**, open it in an editor, or resume the chat. Use **Stop** to end a long scan. Question searches across a large archive can take a long time because every chunk is checked locally.
+For factual questions, Chat Seek asks Laya to identify the intent, then checks likely **original messages** selected with the keyword index. This is a quick pass for early results, not a filter: the full pass still reads every supported chat from the newest chat and newest chunk onward. Each overlapping chunk fits the loaded Laya checkpoint's token limit. Matching chunks appear as the scan progresses. With answer extraction enabled, a configured LLM writes a concise answer and supplies a quote that Chat Seek verifies as an exact substring of the original chunk. Expand **Read full original chunk**, open it in an editor, or resume the chat. Use **Stop** once you have your answer or want to end a long scan.
+
+## How indexing and normal search work
+
+1. **Build a local lookup file.** Chat Seek walks Claude Code and Codex JSONL histories plus OpenCode's file-based storage. For supported user and assistant messages, it records source, session ID, original path, line, time, chat title, and the first 2,800 characters of text. Tool outputs are omitted from this *normal-search* index. This is a private JSON file in VS Code extension storage, not an embedding database and not a copy in the GitHub repo.
+2. **Refresh changed files.** On opening or **Refresh chats**, unchanged Claude Code and Codex files are reused using file size and modification time; changed files are reparsed. OpenCode's file-based storage is currently reread on refresh. The original transcripts are not modified.
+3. **Find likely messages.** Normal search splits the description into words, scores word overlap and early/exact matches across indexed messages, and keeps the top 80 messages. Laya runs locally on a small subset (eight by default), reranks them, and Chat Seek groups them into up to 30 chat results. This is why ordinary search is quick, but can miss text beyond the 2,800-character cutoff or chats with no overlapping words.
+4. **Show the chat.** Each card shows a matching indexed excerpt, relative date, and an action to read nearby indexed messages or resume the original session. Optional one-sentence summaries are generated from sampled excerpts through your configured provider and cached locally; they are separate from indexing and off by default.
+
+Question mode uses the index only to choose promising *original* messages for the quick pass. It rereads those messages from source files, then streams the whole archive in overlapping full-text chunks. On a large archive, the complete Laya pass can take many hours; the quick pass and chunk counter let useful results appear earlier and make progress visible.
 
 ## Open and pin Chat Seek
 
@@ -56,12 +65,12 @@ npm ci
 npm test
 npm run lint
 npm run package
-code --install-extension chat-seek-linux-x64-0.3.0.vsix --force
+code --install-extension chat-seek-linux-x64-0.3.1.vsix --force
 ```
 
 Use `code-insiders` for VS Code Insiders. In a remote window, install into the environment containing the histories, not just the local UI host. Building for another platform requires changing the `vsce --target` argument and `.vscodeignore` ONNX native-binary exclusions to retain that platform's runtime. The supplied VSIX must not be relabeled for another platform.
 
-The first Laya use downloads about 1.7 GB of model weights into `~/.cache/receptron-laya`. The runtime uses CPU inference. Keyword results appear first; Laya then refines the order. Set `chatSeek.useLaya` to `false` if the machine cannot support the model. Opening the search refreshes the local index; unchanged transcript files are reused. **Refresh chats** updates it while the panel is open.
+The first Laya use downloads about 1.7 GB of model weights into `~/.cache/receptron-laya`. The runtime uses CPU inference. Laya first checks whether the query is a factual question. For normal search, keyword results then appear before Laya refines their order. Set `chatSeek.useLaya` to `false` if the machine cannot support the model. Opening the search refreshes the local index; unchanged Claude Code and Codex transcript files are reused. **Refresh chats** updates it while the panel is open.
 
 ## Agent installation instructions
 

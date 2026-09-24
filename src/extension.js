@@ -109,13 +109,16 @@ async function searchQuestion(context, query, model, turn, signal) {
   } catch (err) { post({ type: 'summaryStatus', text: `Answer provider unavailable: ${err.message}` }); }
   if (turn !== latestQuery || signal.aborted) return;
   post({ type: 'summaryStatus', text: providers.length ? `Answer extraction: ${providers.map(p => p.label).join(' → ')}. Exact citations are checked against original text.` : 'No answer extraction enabled. Relevant full chunks will still appear; configure an API key and enable answers for extracted answers.' });
-  post({ type: 'status', text: `Scanning ${groups.length.toLocaleString()} chats, newest first. Every original transcript chunk is checked; this can take a long time.` });
+  post({ type: 'status', text: `Checking likely original messages first, then scanning all ${groups.length.toLocaleString()} chats.` });
   try {
     await scanQuestions(groups, query, model, providers, signal,
       p => {
         if (turn !== latestQuery) return;
         if (p.error) post({ type: 'summaryStatus', text: p.error });
-        post({ type: 'status', text: `${p.done ? 'Finished' : signal.aborted ? 'Stopped' : 'Scanning'} · ${p.chats.toLocaleString()}/${p.totalChats.toLocaleString()} chats · ${p.chunks.toLocaleString()} chunks · ${p.found.toLocaleString()} results${p.preparing ? ` · preparing ${String(p.preparing).slice(0, 60)}` : ''}` });
+        const text = p.phase === 'quick' && !p.done
+          ? `Checking likely original messages · ${p.quickChunks.toLocaleString()} chunks · ${p.found.toLocaleString()} results${p.reading ? ` · ${p.reading}` : ''}${p.extracting ? ' · extracting answer…' : ''}`
+          : `${p.done ? 'Finished' : signal.aborted ? 'Stopped' : 'Scanning full archive'} · ${p.chats.toLocaleString()}/${p.totalChats.toLocaleString()} chats complete · ${p.chunks.toLocaleString()} full-scan chunks · ${p.found.toLocaleString()} results${p.preparing ? ` · reading ${String(p.preparing).slice(0, 50)}` : ''}${p.extracting ? ' · extracting answer…' : ''}`;
+        post({ type: 'status', text });
       },
       async item => {
         if (turn !== latestQuery || signal.aborted) return;
@@ -124,7 +127,7 @@ async function searchQuestion(context, query, model, turn, signal) {
         questionItems.set(id, full);
         currentItems.push(full);
         post({ type: 'questionResult', item: full });
-      });
+      }, undefined, { records: ix.records });
   } catch (err) { if (turn === latestQuery && !signal.aborted) post({ type: 'status', text: `Question scan stopped: ${String(err.message || err).slice(0, 220)}` }); }
 }
 function openConversation(key, line) {

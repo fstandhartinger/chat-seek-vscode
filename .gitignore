@@ -5,6 +5,7 @@ coverage/
 .DS_Store
 demo/frames/
 demo/out/
+demo/search-explainer/out/
 demo/ui.html
 demo/smoke.png
 demo/palette.png

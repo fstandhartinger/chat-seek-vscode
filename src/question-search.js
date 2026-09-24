@@ -6,6 +6,7 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { timestamp } = require('./presentation');
 const { redact } = require('./summaries');
+const { lexicalSearch, terms } = require('./search');
 
 const QUESTION = { type: 'noul', instructions: 'Is the user asking for a specific answer or fact, such as a PIN, date, name, value, or decision?', criteria: { true: 'Specific fact requested', false: 'No specific fact requested' } };
 function evidenceQuestion(query) {
@@ -155,6 +156,191 @@ async function readChunk(spool, meta) {
 }
 async function closeSpool(spool) { await spool.out.close(); await fsp.rm(spool.dir, { recursive: true, force: true }); }
 
+// Read JSONL from the end without preparing or tokenizing the whole chat first.
+async function* reverseLines(file, signal) {
+  const handle = await fsp.open(file, 'r');
+  try {
+    let position = (await handle.stat()).size;
+    let parts = [];
+    while (position > 0 && !signal?.aborted) {
+      const size = Math.min(256 * 1024, position);
+      position -= size;
+      const block = Buffer.allocUnsafe(size);
+      await handle.read(block, 0, size, position);
+      let end = size, newline;
+      while ((newline = block.lastIndexOf(10, end - 1)) !== -1) {
+        const segment = block.subarray(newline + 1, end);
+        const raw = parts.length ? Buffer.concat([segment, ...parts]).toString('utf8') : segment.toString('utf8');
+        if (raw.trim()) yield raw.replace(/\r$/, '');
+        parts = [];
+        end = newline;
+      }
+      if (end) parts.unshift(block.subarray(0, end));
+    }
+    if (!signal?.aborted && parts.length) {
+      const raw = Buffer.concat(parts).toString('utf8');
+      if (raw.trim()) yield raw.replace(/\r$/, '');
+    }
+  } finally { await handle.close(); }
+}
+function splitTailAtBudget(text, budget, encode) {
+  if (encode(text).length <= budget) return 0;
+  let lo = 1, hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (encode(text.slice(text.length - mid)).length <= budget) lo = mid;
+    else hi = mid - 1;
+  }
+  return Math.max(0, text.length - lo);
+}
+async function* reverseChatChunks(group, model, budget, signal) {
+  let buffer = '', line = group.records.at(-1)?.line || 1;
+  function push(text, atLine) {
+    line = atLine || line;
+    const ready = [];
+    for (let end = text.length; end > 0;) {
+      const start = Math.max(0, end - 1800);
+      buffer = text.slice(start, end) + buffer;
+      while (model.encode(buffer).length > budget) {
+        const cut = splitTailAtBudget(buffer, budget, model.encode);
+        const chunk = buffer.slice(cut);
+        ready.push({ text: chunk, line });
+        buffer = buffer.slice(0, Math.min(buffer.length, cut + Math.min(100, Math.floor(chunk.length / 5))));
+      }
+      end = start;
+    }
+    return ready;
+  }
+  if (group.source === 'OpenCode') {
+    const seen = new Set();
+    for (const r of [...group.records].sort((a, b) => b.line - a.line)) {
+      if (signal?.aborted) return;
+      const parent = path.dirname(r.path);
+      if (seen.has(parent)) continue;
+      seen.add(parent);
+      let files;
+      try { files = (await fsp.readdir(parent)).filter(x => x.endsWith('.json')).sort().reverse(); } catch { continue; }
+      for (const name of files) {
+        let part; try { part = JSON.parse(await fsp.readFile(path.join(parent, name), 'utf8')); } catch { continue; }
+        const content = part.type === 'tool' ? fullContent(part.state?.output) : ['text', 'reasoning'].includes(part.type) ? fullContent(part) : '';
+        if (content) for (const chunk of push(`\n[${part.type === 'tool' ? 'tool' : r.role}]\n${content}\n`, r.line)) yield chunk;
+      }
+    }
+  } else {
+    const byFile = new Map();
+    for (const r of group.records) byFile.set(r.path, Math.max(byFile.get(r.path) || -Infinity, timestamp(r.time) || -Infinity));
+    const files = [...byFile].sort((a, b) => b[1] - a[1]);
+    for (const [file] of files) {
+      for await (const raw of reverseLines(file, signal)) {
+        if (signal?.aborted) return;
+        if (!raw.includes('"type"')) continue;
+        let d; try { d = JSON.parse(raw); } catch { continue; }
+        const entry = fullEntry(d, group.source);
+        if (entry) for (const chunk of push(`\n[${entry.role}]\n${entry.text}\n`, line)) yield chunk;
+      }
+    }
+  }
+  if (buffer.trim() && !signal?.aborted) yield { text: buffer, line };
+}
+
+function likelyLines(records, query, limit = 24) {
+  const selected = lexicalSearch(records, query, 80);
+  const byChat = new Map(), output = [];
+  for (const match of selected) {
+    const r = match.record, key = `${r.source}:${r.session}`;
+    const count = byChat.get(key) || 0;
+    if (count >= 5) continue;
+    byChat.set(key, count + 1);
+    output.push(r);
+    if (output.length >= limit) break;
+  }
+  return output;
+}
+async function selectedRawLines(file, source, lineNumbers, query, signal, onRead = () => {}) {
+  const found = new Map();
+  const last = Math.max(...lineNumbers);
+  const stream = fs.createReadStream(file, { encoding: 'utf8', highWaterMark: 256 * 1024 });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let line = 0;
+  try {
+    for await (const raw of lines) {
+      if (signal?.aborted) break;
+      line++;
+      if (line % 5000 === 0) onRead(line);
+      if (lineNumbers.has(line)) {
+        try {
+          const entry = fullEntry(JSON.parse(raw), source);
+          if (entry?.text) found.set(line, { role: entry.role, text: focusWindow(entry.text, query) });
+        } catch { /* malformed candidate */ }
+      }
+      if (line >= last) break;
+    }
+  } finally { lines.close(); stream.destroy(); }
+  return found;
+}
+function focusWindow(text, query, max = 3200) {
+  if (text.length <= max) return text;
+  const words = terms(query).sort((a, b) => b.length - a.length);
+  const lower = text.slice(0, 10000).toLowerCase();
+  const positions = words.map(x => lower.indexOf(x)).filter(x => x >= 0);
+  const center = positions.length ? Math.min(...positions) : 0;
+  const start = Math.max(0, center - 350);
+  return text.slice(start, start + max);
+}
+function* windowChunks(text, model, budget) {
+  let buffer = text;
+  while (model.encode(buffer).length > budget) {
+    const cut = splitTailAtBudget(buffer, budget, model.encode);
+    const chunk = buffer.slice(cut);
+    yield chunk;
+    buffer = buffer.slice(0, Math.min(buffer.length, cut + Math.min(100, Math.floor(chunk.length / 5))));
+  }
+  if (buffer.trim()) yield buffer;
+}
+async function* likelyOriginalChunks(records, groups, query, model, budget, signal, onRead = () => {}) {
+  const hits = likelyLines(records, query);
+  const groupByKey = new Map(groups.map(g => [g.key, g]));
+  const chosen = [], used = new Set();
+  for (const hit of hits) {
+    const key = `${hit.source}:${hit.session}`;
+    const group = groupByKey.get(key);
+    if (!group) continue;
+    const index = group.records.findIndex(r => r.path === hit.path && r.line === hit.line);
+    const next = group.records.slice(index, index + 3).reverse();
+    for (const r of next) {
+      if (!r || r.path !== hit.path) continue;
+      const id = `${r.path}\0${r.line}`;
+      if (!used.has(id)) { chosen.push(r); used.add(id); }
+    }
+  }
+  const byFile = new Map();
+  for (const r of chosen) {
+    if (r.source === 'OpenCode') continue;
+    if (!byFile.has(r.path)) byFile.set(r.path, new Set());
+    byFile.get(r.path).add(r.line);
+  }
+  const rawByFile = new Map();
+  for (const r of chosen) {
+    if (signal?.aborted) return;
+    let entry;
+    try {
+      if (r.source === 'OpenCode') {
+        const part = JSON.parse(await fsp.readFile(r.path, 'utf8'));
+        entry = { role: r.role, text: focusWindow(fullContent(part), query) };
+      } else {
+        if (!rawByFile.has(r.path)) {
+          try { rawByFile.set(r.path, await selectedRawLines(r.path, r.source, byFile.get(r.path), query, signal, line => onRead(r.path, line))); }
+          catch { rawByFile.set(r.path, new Map()); }
+        }
+        entry = rawByFile.get(r.path)?.get(r.line);
+      }
+    } catch { continue; }
+    if (!entry?.text) continue;
+    const window = `\n[${entry.role}]\n${entry.text}\n`;
+    for (const chunk of windowChunks(window, model, budget)) yield { group: groupByKey.get(`${r.source}:${r.session}`), text: chunk, line: r.line };
+  }
+}
+
 function parseExtraction(content, excerpt) {
   let data;
   try { data = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { return null; }
@@ -195,48 +381,59 @@ async function extractAnswer(query, excerpt, providers, signal, fetcher = fetch)
   throw new Error(failures.join('; ') || 'No answer provider configured');
 }
 
-async function scanQuestions(groups, query, model, providers, signal, onProgress, onResult, extractor = extractAnswer) {
+async function scanQuestions(groups, query, model, providers, signal, onProgress, onResult, extractor = extractAnswer, options = {}) {
   const budget = chunkBudget(model, query);
-  let chats = 0, chunks = 0, found = 0;
+  let chats = 0, chunks = 0, quickChunks = 0, found = 0;
   let answerProviders = providers;
   const seenCitations = new Set();
+  async function consider(group, excerpt, line, phase) {
+    if (phase === 'quick') quickChunks++; else chunks++;
+    const judgment = await model.systemOne(excerpt, { answer: evidenceQuestion(query) });
+    if ((judgment.answers?.answer?.noul || 0) >= 0.78) {
+      let extraction = null;
+      if (answerProviders.length) {
+        onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found, extracting: true });
+        try { extraction = await extractor(query, excerpt, answerProviders, signal); }
+        catch (err) {
+          if (signal?.aborted) throw err;
+          answerProviders = [];
+          onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found, error: `Answer provider failed (${err.message}); continuing local scan.` });
+        }
+      }
+      const citationKey = extraction ? `${group.key}\0${extraction.citation}` : '';
+      if ((extraction || !answerProviders.length) && (!citationKey || !seenCitations.has(citationKey))) {
+        if (citationKey) seenCitations.add(citationKey);
+        found++;
+        await onResult({ mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line, chunk: excerpt, ...extraction });
+      }
+    }
+    const n = phase === 'quick' ? quickChunks : chunks;
+    if (n <= 5 || n % 10 === 0 || found && n % 5 === 0) onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found });
+  }
+  if (options.records?.length && !signal?.aborted) {
+    onProgress({ phase: 'quick', chats, totalChats: groups.length, chunks, quickChunks, found });
+    for await (const candidate of likelyOriginalChunks(options.records, groups, query, model, budget, signal,
+      (file, line) => onProgress({ phase: 'quick', chats, totalChats: groups.length, chunks, quickChunks, found, reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
+      if (signal?.aborted) break;
+      await consider(candidate.group, candidate.text, candidate.line, 'quick');
+    }
+  }
   for (const group of groups) {
     if (signal?.aborted) break;
-    let spool;
     try {
-      onProgress({ chats, totalChats: groups.length, chunks, found, preparing: group.title || group.session });
-      spool = await spoolChat(group, model, budget, signal);
-      chats++;
-      for (let i = spool.offsets.length - 1; i >= 0 && !signal?.aborted; i--) {
-        const meta = spool.offsets[i], excerpt = await readChunk(spool, meta);
-        chunks++;
-        const judgment = await model.systemOne(excerpt, { answer: evidenceQuestion(query) });
-        if ((judgment.answers?.answer?.noul || 0) >= 0.78) {
-          let extraction = null;
-          if (answerProviders.length) {
-            try { extraction = await extractor(query, excerpt, answerProviders, signal); }
-            catch (err) {
-              if (signal?.aborted) throw err;
-              answerProviders = [];
-              onProgress({ chats, totalChats: groups.length, chunks, found, error: `Answer provider failed (${err.message}); continuing local scan.` });
-            }
-          }
-          const citationKey = extraction ? `${group.key}\0${extraction.citation}` : '';
-          if ((extraction || !answerProviders.length) && (!citationKey || !seenCitations.has(citationKey))) {
-            if (citationKey) seenCitations.add(citationKey);
-            found++;
-            await onResult({ mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line: meta.line, chunk: excerpt, ...extraction });
-          }
-        }
-        if (chunks % 20 === 0 || found && chunks % 5 === 0) onProgress({ chats, totalChats: groups.length, chunks, found });
+      onProgress({ phase: 'full', chats, totalChats: groups.length, chunks, quickChunks, found, preparing: group.title || group.session });
+      for await (const part of reverseChatChunks(group, model, budget, signal)) {
+        if (signal?.aborted) break;
+        await consider(group, part.text, part.line, 'full');
       }
+      if (!signal?.aborted) chats++;
     } catch (err) {
       if (signal?.aborted) break;
       if (!['ENOENT', 'EACCES'].includes(err.code)) throw err;
-      onProgress({ chats, totalChats: groups.length, chunks, found, error: `Skipped unavailable transcript: ${group.source} ${group.session}` });
-    } finally { if (spool) await closeSpool(spool); }
+      onProgress({ phase: 'full', chats, totalChats: groups.length, chunks, quickChunks, found, error: `Skipped unavailable transcript: ${group.source} ${group.session}` });
+    }
   }
-  onProgress({ chats, totalChats: groups.length, chunks, found, done: !signal?.aborted });
-  return { chats, chunks, found };
+  onProgress({ phase: 'full', chats, totalChats: groups.length, chunks, quickChunks, found, done: !signal?.aborted });
+  return { chats, chunks, quickChunks, found };
 }
-module.exports = { isQuestion, evidenceQuestion, chunkBudget, splitAtBudget, fullContent, fullEntry, chatGroups, spoolChat, readChunk, closeSpool, parseExtraction, extractAnswer, scanQuestions };
+module.exports = { isQuestion, evidenceQuestion, chunkBudget, splitAtBudget, fullContent, fullEntry, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyLines, likelyOriginalChunks, parseExtraction, extractAnswer, scanQuestions };

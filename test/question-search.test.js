@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { isQuestion, chatGroups, spoolChat, readChunk, closeSpool, parseExtraction, extractAnswer, scanQuestions, fullEntry } = require('../src/question-search');
+const { isQuestion, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyOriginalChunks, parseExtraction, extractAnswer, scanQuestions, fullEntry } = require('../src/question-search');
 
 const model = {
   config: { max_len: 512 },
@@ -48,6 +48,43 @@ test('question scan reads complete source, overlaps chunks, and visits newest ch
 test('full transcript extraction includes Codex tool output and Claude tool results', () => {
   assert.equal(fullEntry({ type: 'response_item', payload: { type: 'function_call_output', output: 'The answer is 42.' } }, 'Codex').text, 'The answer is 42.');
   assert.equal(fullEntry({ type: 'user', message: { content: [{ type: 'tool_result', content: 'The answer is 42.' }] } }, 'Claude Code').text, 'The answer is 42.');
+});
+test('reverse reader starts with the newest line even across a large JSONL line', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-reverse-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'large.jsonl');
+  const middle = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'x'.repeat(300000) } });
+  await fs.writeFile(file, ['old', middle, 'new'].join('\n'));
+  const lines = [];
+  for await (const raw of reverseLines(file)) lines.push(raw);
+  assert.equal(lines[0], 'new');
+  assert.equal(lines[1], middle);
+  assert.equal(lines[2], 'old');
+});
+test('reverse chunk stream checks latest text first and covers long unindexed tails', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-reverse-chat-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chat.jsonl');
+  const entry = text => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: text } });
+  await fs.writeFile(file, [entry('EARLIEST-MARKER ' + 'a'.repeat(4000) + ' DEEP-ANSWER'), entry('LATEST-MARKER')].join('\n'));
+  const group = { source: 'Claude Code', session: 'demo', records: [{ path: file, line: 1, time: '2026-01-01' }, { path: file, line: 2, time: '2026-01-02' }] };
+  const chunks = [];
+  for await (const part of reverseChatChunks(group, model, 300)) chunks.push(part.text);
+  assert.ok(chunks[0].includes('LATEST-MARKER'));
+  assert.ok(chunks.some(x => x.includes('DEEP-ANSWER')));
+  assert.ok(chunks.at(-1).includes('EARLIEST-MARKER'));
+  assert.ok(chunks.every(x => model.encode(x).length <= 300));
+});
+test('quick pass uses original source around indexed matches', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-quick-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chat.jsonl');
+  const full = 'violet product ' + 'x'.repeat(2850) + ' launched on 12 March.';
+  await fs.writeFile(file, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: full } }));
+  const records = [{ source: 'Claude Code', session: 'demo', path: file, line: 1, role: 'assistant', text: full.slice(0, 2800), time: '2026-02-02', title: 'Violet product' }];
+  const groups = chatGroups(records), chunks = [];
+  for await (const part of likelyOriginalChunks(records, groups, 'When was the violet product launched?', model, 300)) chunks.push(part.text);
+  assert.ok(chunks.some(x => x.includes('launched on 12 March.')));
 });
 test('answer extraction validates exact citation and falls back after provider error', async () => {
   const providers = [{ label: 'OpenAI', url: 'https://first.test/v1', key: 'test1', model: 'gpt-5.6-luna' }, { label: 'OpenRouter', url: 'https://second.test/v1', key: 'test2', model: 'openai/gpt-5.6-luna' }];
