@@ -2,13 +2,15 @@
 
 # Chat Seek
 
-Find past **Claude Code, Codex, and OpenCode** conversations from a plain language description, inside VS Code.
+Find past **Claude Code, Codex, and OpenCode** conversations from a description, or ask a question about what those chats contain, inside VS Code.
 
 ![Chat Seek demo](media/demo.gif)
 
 [Demo video](media/demo.mp4) · [Narrated explainer](media/explainer.mp4). These videos show the original UI with illustrative excerpts; the current version also has dates, summaries, and resume actions.
 
 Chat Seek searches local user and assistant messages, then uses the [Laya local decision model](https://github.com/receptron/laya) to rerank likely matches. Optional one-sentence AI descriptions help you recognize a chat. Cards show its last activity (“1 week ago”), with the exact date on hover, a readable excerpt, and a **Resume in Claude Code / Codex / OpenCode** action.
+
+For factual questions, Chat Seek asks Laya to identify the intent, then reads the **original transcript files** one chat at a time, newest chat and newest chunk first. Each chunk overlaps the next and fits the loaded Laya checkpoint's token limit. Laya checks every chunk; it does not use the clipped keyword index or a shortlist for this mode. Matching chunks appear as the scan progresses. With answer extraction enabled, a configured LLM writes a concise answer and supplies a quote that Chat Seek verifies as an exact substring of the original chunk. Expand **Read full original chunk**, open it in an editor, or resume the chat. Use **Stop** to end a long scan. Question searches across a large archive can take a long time because every chunk is checked locally.
 
 ## Open and pin Chat Seek
 
@@ -21,6 +23,8 @@ Click **Pin search tab** to keep the editor tab handy. You can right-click the A
 ## Optional summaries and API keys
 
 Search, indexing, and Laya reranking work without an API key. Summaries are **off by default**. Click **Configure summaries** in Chat Seek, or run **Chat Seek: Configure summaries**. Add an API key through the masked input (stored in VS Code SecretStorage), then enable summaries after reviewing the provider disclosure. Existing environment keys are also supported; merely having a key does not enable uploads.
+
+**Question answers** have a separate consent setting, `chatSeek.answers.enabled`, also off by default. On the first factual question with a configured provider, Chat Seek asks before sending any matching original chunks for answer extraction. If you decline or have no key, the exhaustive local scan still shows potential answer chunks, but cannot generate an answer and verified quote. Answer extraction uses the same provider/model/fallback settings and SecretStorage keys as summaries; enabling one feature does not enable the other. The provider receives only chunks Laya marks as potentially answer-bearing, not the whole archive. Common credential patterns are redacted before upload, though other private text may remain.
 
 In `auto` mode, Chat Seek tries only providers with a key and model configured, in this order. Missing keys are skipped; request errors fall through to the next configured provider. Choose one provider in settings to prevent cross-provider fallback.
 
@@ -52,7 +56,7 @@ npm ci
 npm test
 npm run lint
 npm run package
-code --install-extension chat-seek-linux-x64-0.2.1.vsix --force
+code --install-extension chat-seek-linux-x64-0.3.0.vsix --force
 ```
 
 Use `code-insiders` for VS Code Insiders. In a remote window, install into the environment containing the histories, not just the local UI host. Building for another platform requires changing the `vsce --target` argument and `.vscodeignore` ONNX native-binary exclusions to retain that platform's runtime. The supplied VSIX must not be relabeled for another platform.
@@ -66,7 +70,7 @@ When a user points you at this repo to install Chat Seek:
 1. **Identify the actual VS Code environment.** Check standard VS Code versus Insiders, OS and CPU architecture, WSL/SSH/container use, the active user's home, and which environment holds their chat files. Find the correct `code`/`code-insiders` CLI. Do not assume a Windows UI means the extension should run on Windows when the chats are in WSL.
 2. **Install the matching release or build it locally.** Clone this public repository. On Linux x64, install the latest release VSIX, or use the build commands above. For another platform, adjust the packaging target and native runtime exclusions, build on that platform, and verify the included ONNX runtime. Keep local adjustments documented; never bundle private histories or credentials.
 3. **Locate histories and adjust only what is needed.** Defaults are below. Use `chatSeek.extraRoots` for custom roots or Windows mounts. Verify a known chat can be indexed; use local indexing and synthetic text for API smoke tests. No API key is required for basic installation.
-4. **Explain optional summaries.** Tell the user they can now provide an OpenAI, OpenRouter, TensorX, or compatible-provider key through **Chat Seek: Configure summaries**. Explain sampled-excerpt uploads, possible charges, local caching, and the configured fallback order. Never ask them to paste a key into a public issue or commit it. Leave summaries disabled unless they authorize enabling them; if they already authorized it, carry that authorization forward. Prefer SecretStorage or existing environment variables.
+4. **Explain optional summaries and question answers.** Tell the user they can provide an OpenAI, OpenRouter, TensorX, or compatible-provider key through **Chat Seek: Configure summaries**. Summaries send sampled excerpts and are cached; question answer extraction sends Laya-matched original chunks and checks exact quotes. Both have separate opt-in settings and can incur API charges. Never ask them to paste a key into a public issue or commit it. Leave cloud features disabled unless they authorize them; if they already authorized them, carry that authorization forward. Prefer SecretStorage or existing environment variables.
 5. **Verify the installed result.** Check `code --list-extensions --show-versions` (or the appropriate Insiders/remote CLI) for `fstandhartinger.chat-seek`. Verify commands and the sidebar are available. If a native runtime cannot load, report that accurately and keep keyword search usable.
 6. **Give concrete opening instructions.** Tell the user: “Press Ctrl+Shift+P (Cmd+Shift+P on macOS), run Chat Seek: Search past AI chats, and type your description. You can also use the Chat Seek Activity Bar icon. Click Pin search tab to keep it handy.” Suggest **Developer: Reload Window** only if the command/icon has not appeared. Explain that Resume opens the corresponding CLI in VS Code's terminal and may require CLI login.
 
@@ -78,12 +82,12 @@ Finish by stating which environment/version you installed, where to open the sea
 - `~/.codex/sessions` and `~/.codex/archived_sessions`
 - `~/.local/share/opencode/storage` (file-based session/message/part storage)
 
-`chatSeek.extraRoots` accepts additional paths. Paths containing `codex` or `opencode` select those parsers; other paths are treated as Claude Code roots. OpenCode roots should point at its `storage` directory. Only user and assistant text is indexed; tool results and subagent transcripts are excluded. Newer OpenCode database-only storage is not yet imported.
+`chatSeek.extraRoots` accepts additional paths. Paths containing `codex` or `opencode` select those parsers; other paths are treated as Claude Code roots. OpenCode roots should point at its `storage` directory. The ordinary keyword index contains user and assistant text; question mode re-reads the original files and also includes text tool results and reasoning saved in those transcript files. Standalone subagent files that the index never associates with a chat, and newer OpenCode database-only storage, are not imported.
 
-The shortlist depends on word overlap; a description with no shared words can miss a chat. Long messages are clipped at 2,800 characters, and previews show nearby indexed messages. Missing timestamps are labeled “Date unknown”. Dates refer to the latest indexed message in the conversation. Native resume availability depends on the source application's retained session files.
+For description search, the shortlist depends on word overlap; a description with no shared words can miss a chat. Long messages in that index are clipped at 2,800 characters. Question mode bypasses those limits by streaming original files into overlapping chunks. Laya's question routing and evidence judgment can make mistakes; cloud answer extraction verifies that the returned quote is literally present in the chunk, but it cannot guarantee that the answer is correct. Missing timestamps are labeled “Date unknown”. Dates refer to the latest indexed message in the conversation. Native resume availability depends on the source application's retained session files.
 
 ## Development
 
-Run `npm test`, `npm run lint`, and `npm run package`. Tests cover parser behavior, index updates, summary cache invalidation and fallback, redaction, relative dates, and safe resume arguments. Public videos use illustrative data.
+Run `npm test`, `npm run lint`, and `npm run package`. Tests cover parser behavior, index updates, full-text chunk overlap and ordering, citation validation, provider fallback, summary cache invalidation, redaction, relative dates, and safe resume arguments. Public videos use illustrative data.
 
 MIT license. Laya weights are downloaded separately under Apache 2.0.
