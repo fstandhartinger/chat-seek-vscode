@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { isQuestion, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyOriginalChunks, parseExtraction, extractAnswer, scanQuestions, fullEntry } = require('../src/question-search');
+const { isQuestion, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyOriginalChunks, literalOriginalChunks, focusWindow, localPinAnswer, parseExtraction, extractAnswer, scanQuestions, fullEntry } = require('../src/question-search');
 
 const model = {
   config: { max_len: 512 },
@@ -85,6 +85,44 @@ test('quick pass uses original source around indexed matches', async t => {
   const groups = chatGroups(records), chunks = [];
   for await (const part of likelyOriginalChunks(records, groups, 'When was the violet product launched?', model, 300)) chunks.push(part.text);
   assert.ok(chunks.some(x => x.includes('launched on 12 March.')));
+});
+test('literal pass finds a locally verified PIN beyond the clipped index and distinguishes the named account', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-literal-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chat.jsonl');
+  const content = 'benchmarkheaven project note. ' + 'x'.repeat(3500) + ' DM PIN 1111 (twitter), @benchmarkheaven DM passcode 2222.';
+  const entry = text => JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
+  await fs.writeFile(file, [entry('benchmarkheaven plans'), entry(content)].join('\n'));
+  const records = [
+    { source: 'Claude Code', session: 'demo', path: file, line: 1, role: 'user', text: 'benchmarkheaven plans', time: '2026-01-01', title: 'Demo' },
+    { source: 'Claude Code', session: 'demo', path: file, line: 2, role: 'user', text: content.slice(0, 2800), time: '2026-01-01', title: 'Demo' }
+  ];
+  const query = "what's the pin for benchmarkheaven dm chat?", groups = chatGroups(records), candidates = [];
+  for await (const item of literalOriginalChunks(records, groups, query, model, 400)) candidates.push(item);
+  assert.ok(candidates.some(x => x.local?.answer.includes('2222')));
+  assert.ok(!candidates.some(x => x.local?.answer.includes('1111')));
+  const results = [];
+  let sentToApi = false;
+  await scanQuestions(groups, query, model, [{ label: 'Cloud' }], new AbortController().signal, () => {}, item => results.push(item), () => { sentToApi = true; return null; }, { records });
+  assert.equal(sentToApi, false, 'PIN question stays local even when a provider is configured');
+  assert.ok(results.some(x => x.answer?.includes('2222') && x.citation.includes('@benchmarkheaven DM passcode 2222')));
+  assert.ok(results.some(x => x.verification === 'verified' && x.provider === 'Local exact match'));
+  assert.ok(focusWindow(content, query, 900).includes('DM passcode 2222'));
+  assert.equal(localPinAnswer('what is the PIN?', 'DM PIN 1111, other PIN 2222'), null, 'ambiguous unnamed codes stay unverified');
+});
+test('archive-wide literal lookup finds a hidden answer outside the top indexed chats', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-rg-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const records = [];
+  for (let i = 0; i < 4; i++) {
+    const file = path.join(dir, `${i}.jsonl`);
+    const content = i < 3 ? `benchmarkheaven DM PIN discussion ${i} has no code.` : 'unrelated beginning '.repeat(200) + '@benchmarkheaven DM passcode 2222';
+    await fs.writeFile(file, JSON.stringify({ type: 'user', message: { role: 'user', content } }));
+    records.push({ source: 'Claude Code', session: String(i), path: file, line: 1, role: 'user', text: content.slice(0, 2800), time: `2026-01-0${i + 1}`, title: String(i) });
+  }
+  const matches = [];
+  for await (const item of literalOriginalChunks(records, chatGroups(records), "what's the pin for benchmarkheaven dm chat?", model, 400, undefined, [{ path: dir }])) matches.push(item);
+  assert.ok(matches.some(x => x.group.session === '3' && x.local?.answer.includes('2222')));
 });
 test('answer extraction validates exact citation and falls back after provider error', async () => {
   const providers = [{ label: 'OpenAI', url: 'https://first.test/v1', key: 'test1', model: 'gpt-5.6-luna' }, { label: 'OpenRouter', url: 'https://second.test/v1', key: 'test2', model: 'openai/gpt-5.6-luna' }];

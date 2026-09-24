@@ -106,24 +106,29 @@ async function searchQuestion(context, query, model, turn, signal) {
   post({ type: 'results', items: [] });
   post({ type: 'mode', mode: 'question' });
   let providers = [];
-  try {
-    const available = await resolveProviders(summaryConfig(), name => context.secrets.get(`summary.${name}`));
-    if (available.length && !vscode.workspace.getConfiguration('chatSeek.answers').get('enabled', false)) {
-      const consent = await vscode.window.showInformationMessage(`Extract answers with ${available.map(p => p.label).join(' → ')}? Matching original chat chunks will be sent to these providers and may incur charges. Chat Seek will verify that each citation appears exactly in the chunk.`, { modal: true }, 'Enable answers');
-      if (consent === 'Enable answers') await vscode.workspace.getConfiguration('chatSeek.answers').update('enabled', true, vscode.ConfigurationTarget.Global);
-    }
-    if (vscode.workspace.getConfiguration('chatSeek.answers').get('enabled', false)) providers = available;
-  } catch (err) { post({ type: 'summaryStatus', text: `Answer provider unavailable: ${err.message}` }); }
+  const sensitiveQuestion = /\b(?:pin|passcode|password|otp|secret)\b/i.test(query);
+  if (!sensitiveQuestion) {
+    try {
+      const available = await resolveProviders(summaryConfig(), name => context.secrets.get(`summary.${name}`));
+      if (available.length && !vscode.workspace.getConfiguration('chatSeek.answers').get('enabled', false)) {
+        const consent = await vscode.window.showInformationMessage(`Extract answers with ${available.map(p => p.label).join(' → ')}? Matching original chat chunks will be sent to these providers and may incur charges. Chat Seek will verify that each citation appears exactly in the chunk.`, { modal: true }, 'Enable answers');
+        if (consent === 'Enable answers') await vscode.workspace.getConfiguration('chatSeek.answers').update('enabled', true, vscode.ConfigurationTarget.Global);
+      }
+      if (vscode.workspace.getConfiguration('chatSeek.answers').get('enabled', false)) providers = available;
+    } catch (err) { post({ type: 'summaryStatus', text: `Answer provider unavailable: ${err.message}` }); }
+  }
   if (turn !== latestQuery || signal.aborted) return;
-  post({ type: 'summaryStatus', text: providers.length ? `Answer extraction: ${providers.map(p => p.label).join(' → ')}. Exact citations are checked against original text.` : 'No answer extraction enabled. Relevant full chunks will still appear; configure an API key and enable answers for extracted answers.' });
-  post({ type: 'status', text: `Checking likely original messages first, then scanning all ${groups.length.toLocaleString()} chats.` });
+  post({ type: 'summaryStatus', text: sensitiveQuestion ? 'Sensitive answers stay local. Exact PIN citations are read from the original transcript; no chunk is sent to an API.' : providers.length ? `Answer extraction: ${providers.map(p => p.label).join(' → ')}. Exact citations are checked against original text.` : 'No answer extraction enabled. Relevant full chunks will still appear; configure an API key and enable answers for extracted answers.' });
+  post({ type: 'status', text: `Searching original text for exact terms, then scanning all ${groups.length.toLocaleString()} chats.` });
   try {
     await scanQuestions(groups, query, model, providers, signal,
       p => {
         if (turn !== latestQuery) return;
         if (p.error) post({ type: 'summaryStatus', text: p.error });
         const pending = p.pending ? ` · ${p.pending.toLocaleString()} checking` : '';
-        const text = p.phase === 'quick' && !p.done
+        const text = p.phase === 'literal' && !p.done
+          ? `Searching original text · ${p.literalChunks.toLocaleString()} candidate chunks · ${p.found.toLocaleString()} results${pending}${p.reading ? ` · ${p.reading}` : ''}`
+          : p.phase === 'quick' && !p.done
           ? `Checking likely original messages · ${p.quickChunks.toLocaleString()} chunks · ${p.found.toLocaleString()} results${pending}${p.reading ? ` · ${p.reading}` : ''}`
           : `${p.done ? 'Finished' : signal.aborted ? 'Stopped' : 'Scanning full archive'} · ${p.chats.toLocaleString()}/${p.totalChats.toLocaleString()} chats complete · ${p.chunks.toLocaleString()} full-scan chunks · ${p.found.toLocaleString()} results${pending}${p.preparing ? ` · reading ${String(p.preparing).slice(0, 50)}` : ''}`;
         post({ type: 'status', text });
@@ -133,11 +138,13 @@ async function searchQuestion(context, query, model, turn, signal) {
         const id = `${turn}-${questionItems.size}`;
         const full = { ...item, id, relativeDate: relativeTime(item.time), fullDate: Number.isFinite(item.time) ? new Date(item.time).toLocaleString() : '', canResume: !!resumeSpec(item) };
         questionItems.set(id, full);
-        currentItems.push(full);
-        post({ type: 'questionResult', item: full });
+        if (full.verification === 'verified') currentItems.unshift(full);
+        else currentItems.push(full);
+        post({ type: 'questionResult', item: full, prepend: full.verification === 'verified' });
         return id;
       }, undefined, {
         records: ix.records,
+        roots: roots(),
         onUpdate: (id, changes) => {
           if (turn !== latestQuery || signal.aborted) return;
           const item = questionItems.get(id);

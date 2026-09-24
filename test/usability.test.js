@@ -30,7 +30,7 @@ test('provider discovery skips missing keys and supports OpenRouter alias',async
 test('summary fallback, cache reuse and changed-chat invalidation',async t=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'chat-seek-summary-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
  let calls=0;const store=new SummaryStore(path.join(dir,'cache.json'),async url=>{calls++;return url.includes('bad')?{ok:false,status:429}:{ok:true,json:async()=>({choices:[{finish_reason:'stop',message:{content:'Built the JevBench scoring page with calibration tests.'}}]})};});
- const providers=[{label:'OpenAI',url:'https://bad.test/v1',key:'secret',model:'gpt-4.1-nano'},{label:'OpenRouter',url:'https://ok.test/v1',key:'secret',model:'openai/gpt-4.1-nano'}];
+ const providers=[{label:'OpenAI',url:'https://bad.test/v1',key:'secret',model:'gpt-5.6-luna'},{label:'OpenRouter',url:'https://ok.test/v1',key:'secret',model:'openai/gpt-5.6-luna'}];
  const first=await store.get(records,providers);assert.equal(first.provider,'OpenRouter');assert.equal(calls,2);
  await store.get(records,providers);assert.equal(calls,2);
  const loaded=new SummaryStore(store.file);await loaded.load();assert.equal(loaded.cached(records).text,first.text);
@@ -41,6 +41,8 @@ test('sampling stays bounded, covers end of chat, and redacts known credentials'
  const sample=sampleChat(many);assert.ok(sample.length<7500);assert.ok(sample.includes('Message 99'));
  assert.ok(!redact('api_key=secretvalue and sk-1234567890123456 known-test-secret',['known-test-secret']).includes('secretvalue'));
  assert.ok(!redact('known-test-secret',['known-test-secret']).includes('known-test-secret'));
+ assert.ok(!redact('DM PIN 1234, @benchmarkheaven DM passcode 5678').includes('1234'));
+ assert.ok(!redact('DM PIN 1234, @benchmarkheaven DM passcode 5678').includes('5678'));
 });
 test('Codex metadata preserves resume ID and working directory',async t=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'chat-seek-meta-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));

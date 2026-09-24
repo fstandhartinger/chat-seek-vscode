@@ -5,6 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const crypto = require('node:crypto');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { timestamp } = require('./presentation');
 const { redact } = require('./summaries');
 const { lexicalSearch, terms } = require('./search');
@@ -281,12 +283,114 @@ async function selectedRawLines(file, source, lineNumbers, query, signal, onRead
 }
 function focusWindow(text, query, max = 3200) {
   if (text.length <= max) return text;
-  const words = terms(query).sort((a, b) => b.length - a.length);
-  const lower = text.slice(0, 10000).toLowerCase();
-  const positions = words.map(x => lower.indexOf(x)).filter(x => x >= 0);
-  const center = positions.length ? Math.min(...positions) : 0;
-  const start = Math.max(0, center - 350);
-  return text.slice(start, start + max);
+  const words = terms(query);
+  const lower = text.toLowerCase();
+  const anchor = [...words].sort((a, b) => b.length - a.length).find(x => lower.includes(x));
+  if (!anchor) return text.slice(0, max);
+  let bestStart = 0, bestScore = -1, at = -1, checked = 0;
+  while ((at = lower.indexOf(anchor, at + 1)) !== -1 && checked++ < 1000) {
+    const start = Math.max(0, Math.min(text.length - max, at - Math.floor(max / 3)));
+    const window = lower.slice(start, start + max);
+    const coverage = words.filter(x => window.includes(x)).length;
+    const score = coverage * 100 + Math.min(20, words.reduce((n, x) => n + window.split(x).length - 1, 0));
+    if (score > bestScore) { bestScore = score; bestStart = start; }
+    if (coverage === words.length && score >= words.length * 100 + 6) break;
+  }
+  return text.slice(bestStart, bestStart + max);
+}
+function localPinAnswer(query, text) {
+  if (!/\b(?:pin|passcode)\b/i.test(query)) return null;
+  const entities = terms(query).filter(x => !['pin', 'passcode', 'code', 'dm', 'twitter', 'account'].includes(x) && x.length >= 4);
+  const matches = [];
+  for (const m of text.matchAll(/\b(pin|passcode)\b\s*[:=#-]?\s*(\d{3,10})\b/gi)) {
+    const before = text.slice(Math.max(0, m.index - 90), m.index);
+    const cut = Math.max(before.lastIndexOf(','), before.lastIndexOf(';'), before.lastIndexOf('\n'));
+    const label = before.slice(cut + 1);
+    const near = label.toLowerCase();
+    const entityScore = entities.reduce((n, x) => n + (near.includes(x) ? 8 + x.length / 2 : 0), 0);
+    const score = entityScore + (/\bdm\b/i.test(label) ? 2 : 0) + (m[1].toLowerCase() === 'pin' ? 1 : 0);
+    const start = m.index - label.length;
+    matches.push({ score, value: m[2], citation: text.slice(start, m.index + m[0].length).trim(), position: start });
+  }
+  matches.sort((a, b) => b.score - a.score);
+  if (!matches.length || (entities.length && matches[0].score < 8)) return null;
+  if (matches[1] && matches[0].value !== matches[1].value && matches[0].score - matches[1].score < 4) return null;
+  return { answer: `The PIN/passcode is ${matches[0].value}.`, citation: matches[0].citation, provider: 'Local exact match', position: matches[0].position };
+}
+function excerptAround(text, position, model, budget) {
+  let start = Math.max(0, position - 250), end = Math.min(text.length, position + 600);
+  while (start < position && model.encode(text.slice(start, end)).length > budget) start = Math.min(position, start + 50);
+  while (end > position + 100 && model.encode(text.slice(start, end)).length > budget) end -= 50;
+  return text.slice(start, end);
+}
+async function* literalOriginalChunks(records, groups, query, model, budget, signal, roots = [], onRead = () => {}) {
+  const words = terms(query);
+  if (!words.length) return;
+  const hasWords = text => {
+    const lower = text.toLowerCase();
+    return words.every(x => ['pin', 'passcode'].includes(x) ? /\b(?:pin|passcode)\b/i.test(text) : lower.includes(x));
+  };
+  const anchor = [...words].sort((a, b) => b.length - a.length)[0];
+  if (anchor.length < 4) return;
+  const byKey = new Map(groups.map(g => [g.key, g]));
+  const byFile = new Map();
+  for (const group of groups) for (const r of group.records) if (!byFile.has(r.path)) byFile.set(r.path, group);
+  const selected = [], seenGroups = new Set(), checkedFiles = new Set();
+  for (const r of likelyLines(records, query)) {
+    const key = `${r.source}:${r.session}`;
+    if (seenGroups.has(key)) continue;
+    seenGroups.add(key);
+    selected.push(byKey.get(key));
+    if (selected.length >= 3) break;
+  }
+  async function* scanFile(file, group) {
+    if (!group || checkedFiles.has(file) || signal?.aborted) return;
+    checkedFiles.add(file);
+    if (group.source === 'OpenCode') {
+      let d; try { d = JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return; }
+      const content = fullContent(d);
+      if (hasWords(content)) {
+        const local = localPinAnswer(query, content);
+        const excerpt = local ? excerptAround(content, local.position, model, budget) : focusWindow(content, query, 1200);
+        yield { group, text: excerpt, line: group.records.find(r => r.path === file)?.line || 1, local };
+      }
+      return;
+    }
+    const stream = fs.createReadStream(file, { encoding: 'utf8', highWaterMark: 256 * 1024 });
+    const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let line = 0;
+    try {
+      for await (const raw of lines) {
+        if (signal?.aborted) break;
+        line++;
+        if (line % 5000 === 0) onRead(file, line);
+        if (!raw.toLowerCase().includes(anchor)) continue;
+        let entry; try { entry = fullEntry(JSON.parse(raw), group.source); } catch { continue; }
+        if (!entry?.text) continue;
+        if (!hasWords(entry.text)) continue;
+        const local = localPinAnswer(query, entry.text);
+        const excerpt = local ? excerptAround(entry.text, local.position, model, budget) : focusWindow(entry.text, query, 1200);
+        yield { group, text: excerpt, line, local };
+      }
+    } finally { lines.close(); stream.destroy(); }
+  }
+  for (const group of selected) {
+    if (!group || signal?.aborted) break;
+    for (const file of new Set(group.records.map(r => r.path))) yield* scanFile(file, group);
+  }
+  if (signal?.aborted || !roots.length) return;
+  let files = [];
+  try {
+    const { stdout } = await promisify(execFile)('rg', ['-l', '-i', '-F', '--glob', '*.jsonl', '--glob', '!**/subagents/**', '--', anchor, ...roots.map(r => r.path)], { timeout: 15000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
+    files = stdout.trim().split(/\r?\n/).filter(Boolean);
+  } catch (err) {
+    if (!err.stdout) return;
+    files = String(err.stdout).trim().split(/\r?\n/).filter(Boolean);
+  }
+  for (const file of files) {
+    if (signal?.aborted) break;
+    yield* scanFile(file, byFile.get(file));
+  }
 }
 function* windowChunks(text, model, budget) {
   let buffer = text;
@@ -351,6 +455,7 @@ function parseExtraction(content, excerpt) {
   return { answer, citation: quote };
 }
 async function extractAnswer(query, excerpt, providers, signal, fetcher = fetch) {
+  if (/\b(?:pin|passcode|password|otp|secret)\b/i.test(query)) throw new Error('Sensitive answers stay local');
   const secrets = [...providers.map(p => p.key), ...Object.entries(process.env).filter(([k]) => /KEY|TOKEN|SECRET|PASSWORD/.test(k)).map(([, v]) => v)];
   const safeExcerpt = redact(excerpt, secrets);
   const failures = [];
@@ -384,11 +489,11 @@ async function extractAnswer(query, excerpt, providers, signal, fetcher = fetch)
 
 async function scanQuestions(groups, query, model, providers, signal, onProgress, onResult, extractor = extractAnswer, options = {}) {
   const budget = chunkBudget(model, query);
-  let chats = 0, chunks = 0, quickChunks = 0, found = 0, pending = 0, phase = 'quick';
-  let answerProviders = providers;
+  let chats = 0, chunks = 0, quickChunks = 0, literalChunks = 0, found = 0, pending = 0, phase = 'literal';
+  let answerProviders = /\b(?:pin|passcode|password|otp|secret)\b/i.test(query) ? [] : providers;
   const seenCitations = new Set(), seenChunks = new Set();
   const queued = [], running = new Set();
-  const progress = extra => onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, found, pending, ...extra });
+  const progress = extra => onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, literalChunks, found, pending, ...extra });
   async function finishCandidate(task) {
     const { group, excerpt, id } = task;
     try {
@@ -427,15 +532,28 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
       running.add(work);
     }
   }
-  async function consider(group, excerpt, line, pass) {
+  async function consider(group, excerpt, line, pass, local = null) {
     phase = pass;
-    if (pass === 'quick') quickChunks++; else chunks++;
+    if (pass === 'literal') literalChunks++;
+    else if (pass === 'quick') quickChunks++;
+    else chunks++;
     const chunkKey = crypto.createHash('sha256').update(group.key).update('\0').update(excerpt).digest('hex');
     if (seenChunks.has(chunkKey)) return;
     seenChunks.add(chunkKey);
+    if (local && excerpt.includes(local.citation)) {
+      const citationKey = `${group.key}\0${local.citation}`;
+      if (seenCitations.has(citationKey)) return;
+      seenCitations.add(citationKey);
+      found++;
+      const { position, ...answer } = local;
+      await onResult({ mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line, chunk: excerpt, ...answer, verification: 'verified' });
+      progress();
+      return true;
+    }
     const judgment = await model.systemOne(excerpt, { answer: evidenceQuestion(query) });
     if (signal?.aborted) return;
     if ((judgment.answers?.answer?.noul || 0) >= 0.78) {
+      if (!answerProviders.length && [...seenCitations].some(x => x.startsWith(`${group.key}\0`) && excerpt.includes(x.slice(group.key.length + 1)))) return;
       const item = { mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line, chunk: excerpt, verification: answerProviders.length ? 'pending' : 'unavailable' };
       const id = await onResult(item);
       if (answerProviders.length) {
@@ -446,10 +564,29 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
         while (queued.length >= 8 && running.size && !signal?.aborted) await Promise.race(running);
       } else found++;
     }
-    const n = pass === 'quick' ? quickChunks : chunks;
+    const n = pass === 'literal' ? literalChunks : pass === 'quick' ? quickChunks : chunks;
     if (n <= 5 || n % 10 === 0 || found && n % 5 === 0) progress();
   }
-  if (options.records?.length && !signal?.aborted) {
+  async function runLiteral() {
+    if (!options.records?.length || signal?.aborted) return;
+    phase = 'literal';
+    progress();
+    const literalCandidates = [];
+    let localFound = false;
+    for await (const candidate of literalOriginalChunks(options.records, groups, query, model, budget, signal, options.roots,
+      (file, line) => progress({ reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
+      if (signal?.aborted) break;
+      if (candidate.local && await consider(candidate.group, candidate.text, candidate.line, 'literal', candidate.local)) { localFound = true; continue; }
+      if (literalCandidates.length < 8) literalCandidates.push(candidate);
+    }
+    if (!localFound) for (const candidate of literalCandidates) {
+      if (signal?.aborted) break;
+      await consider(candidate.group, candidate.text, candidate.line, 'literal');
+    }
+  }
+  async function runQuick() {
+    if (!options.records?.length || signal?.aborted) return;
+    phase = 'quick';
     progress();
     for await (const candidate of likelyOriginalChunks(options.records, groups, query, model, budget, signal,
       (file, line) => progress({ reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
@@ -457,6 +594,8 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
       await consider(candidate.group, candidate.text, candidate.line, 'quick');
     }
   }
+  if (/\b(?:pin|passcode|password|otp|secret)\b/i.test(query)) { await runLiteral(); await runQuick(); }
+  else { await runQuick(); await runLiteral(); }
   for (const group of groups) {
     if (signal?.aborted) break;
     try {
@@ -479,6 +618,6 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
   while (running.size) await Promise.all([...running]);
   phase = 'full';
   progress({ done: !signal?.aborted });
-  return { chats, chunks, quickChunks, found };
+  return { chats, chunks, quickChunks, literalChunks, found };
 }
-module.exports = { isQuestion, evidenceQuestion, chunkBudget, splitAtBudget, fullContent, fullEntry, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyLines, likelyOriginalChunks, parseExtraction, extractAnswer, scanQuestions };
+module.exports = { isQuestion, evidenceQuestion, chunkBudget, splitAtBudget, fullContent, fullEntry, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyLines, likelyOriginalChunks, literalOriginalChunks, focusWindow, localPinAnswer, parseExtraction, extractAnswer, scanQuestions };

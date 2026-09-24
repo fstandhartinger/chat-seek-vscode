@@ -28,6 +28,7 @@ function redact(text, secrets = []) {
   for (const secret of secrets) if (secret && secret.length >= 8) s = s.split(secret).join('[REDACTED]');
   return s.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, '[REDACTED KEY]')
     .replace(/\b(?:sk-|gh[pousr]_|apikey_)[A-Za-z0-9_-]{12,}/g, '[REDACTED]')
+    .replace(/(\b(?:pin|passcode|otp)\b\s*(?:(?:is|=|:|#)\s*)?)\d{3,10}\b/gi, '$1[REDACTED]')
     .replace(/((?:api[_ -]?key|password|secret|access[_ -]?token|authorization)\s*["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, '$1[REDACTED]');
 }
 function sampleChat(records, secrets = []) {
