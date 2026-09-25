@@ -27,6 +27,18 @@ Press **Ctrl+Shift+P** (**Cmd+Shift+P** on macOS), run **Chat Seek: Search past 
 
 Click **Pin search tab** to keep the editor tab handy. You can right-click the Activity Bar to show Chat Seek if its icon is hidden, or drag its view to your preferred sidebar. If commands do not appear immediately after installation, run **Developer: Reload Window**.
 
+Open **Options** under the search box to choose a search approach. The selection is saved for the next time you open Chat Seek.
+
+| Approach | What it does |
+| --- | --- |
+| **Auto** | Uses Laya to decide whether to find a chat or run the complete answer scan. This is the default. |
+| **Find a chat** | Searches the clipped local index and reranks likely chats with Laya. Use it when you want to locate a conversation. |
+| **Exact terms in originals** | Looks for all significant query words in original messages, including an archive-wide `rg` lookup when available. Uses no model or API and shows up to 100 matches. It can miss paraphrases or files absent from the index. |
+| **Quick answer** | Checks likely original messages and exact-term matches with Laya, then stops. Useful when the full archive scan would be too slow. It can miss answers outside these candidates. |
+| **Complete answer scan** | Runs the quick passes, then reads every indexed chat from newest to oldest in overlapping original-text chunks and checks each with Laya. On large histories, this can take hours. |
+
+The two answer approaches can use optional cloud answer extraction after you enable it. PIN and other sensitive questions stay local. If `chatSeek.useLaya` is disabled or Laya cannot load, **Exact terms in originals** still works.
+
 **Resume** opens the matching CLI in a VS Code integrated terminal using its session ID and original working directory when available. It does not automatically submit a new prompt. The CLI must be installed and signed in within the same environment as the extension. This launches the CLI, not a vendor's proprietary chat sidebar. An archived or moved session may no longer be resumable by its CLI; **Read excerpt** still opens the indexed context.
 
 ## Optional summaries and API keys
@@ -65,7 +77,7 @@ npm ci
 npm test
 npm run lint
 npm run package
-code --install-extension chat-seek-linux-x64-0.3.3.vsix --force
+code --install-extension chat-seek-linux-x64-0.3.4.vsix --force
 ```
 
 Use `code-insiders` for VS Code Insiders. In a remote window, install into the environment containing the histories, not just the local UI host. Building for another platform requires changing the `vsce --target` argument and `.vscodeignore` ONNX native-binary exclusions to retain that platform's runtime. The supplied VSIX must not be relabeled for another platform.

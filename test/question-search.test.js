@@ -4,6 +4,9 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { isQuestion, chatGroups, spoolChat, readChunk, closeSpool, reverseLines, reverseChatChunks, likelyOriginalChunks, literalOriginalChunks, focusWindow, localPinAnswer, parseExtraction, extractAnswer, scanQuestions, fullEntry } = require('../src/question-search');
+const { approaches, normalizeApproach } = require('../src/approaches');
+const { html } = require('../src/webview');
+const vm = require('node:vm');
 
 const model = {
   config: { max_len: 512 },
@@ -123,6 +126,45 @@ test('archive-wide literal lookup finds a hidden answer outside the top indexed 
   const matches = [];
   for await (const item of literalOriginalChunks(records, chatGroups(records), "what's the pin for benchmarkheaven dm chat?", model, 400, undefined, [{ path: dir }])) matches.push(item);
   assert.ok(matches.some(x => x.group.session === '3' && x.local?.answer.includes('2222')));
+});
+test('search approach menu includes every supported route and its script parses', () => {
+  const markup = html('test-nonce');
+  assert.match(markup, /<details class="options" id="options">/);
+  assert.match(markup, /<select id="approach"/);
+  for (const approach of approaches) assert.ok(markup.includes(`<option value="${approach.id}">`));
+  const script = markup.match(/<script nonce="test-nonce">([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script);
+  assert.doesNotThrow(() => new vm.Script(script));
+  assert.equal(normalizeApproach('quick'), 'quick');
+  assert.equal(normalizeApproach('unknown'), 'auto');
+});
+test('exact terms route uses original text without model or answer API', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-exact-route-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chat.jsonl');
+  const text = 'Project Mercury launch date was 12 March.';
+  await fs.writeFile(file, JSON.stringify({ type: 'user', message: { role: 'user', content: text } }));
+  const records = [{ source: 'Claude Code', session: 'demo', path: file, line: 1, role: 'user', text: text.slice(0, 8), time: '2026-02-02', title: 'Mercury' }];
+  const results = [];
+  const result = await scanQuestions(chatGroups(records), 'mercury launch date', null, [{ label: 'test' }], new AbortController().signal,
+    () => {}, item => results.push(item), () => { throw new Error('Answer API must not run'); },
+    { strategy: 'literal', records, roots: [{ path: dir }] });
+  assert.equal(result.chunks, 0);
+  assert.equal(result.quickChunks, 0);
+  assert.ok(results.some(x => x.verification === 'literal' && x.chunk.includes(text)));
+});
+test('quick answer route stops before full archive scan', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-seek-quick-route-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'chat.jsonl');
+  const text = 'Project Mercury launched on 12 March, violet comet.';
+  await fs.writeFile(file, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: text } }));
+  const records = [{ source: 'Claude Code', session: 'demo', path: file, line: 1, role: 'assistant', text, time: '2026-02-02', title: 'Mercury' }];
+  const result = await scanQuestions(chatGroups(records), 'When did Project Mercury launch?', model, [], new AbortController().signal,
+    () => {}, () => {}, undefined, { strategy: 'quick', records, roots: [{ path: dir }] });
+  assert.equal(result.chunks, 0);
+  assert.ok(result.quickChunks + result.literalChunks > 0);
+  assert.equal(result.chats, 0);
 });
 test('answer extraction validates exact citation and falls back after provider error', async () => {
   const providers = [{ label: 'OpenAI', url: 'https://first.test/v1', key: 'test1', model: 'gpt-5.6-luna' }, { label: 'OpenRouter', url: 'https://second.test/v1', key: 'test2', model: 'openai/gpt-5.6-luna' }];

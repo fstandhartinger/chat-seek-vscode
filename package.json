@@ -2,7 +2,7 @@
   "name": "chat-seek",
   "displayName": "Chat Seek",
   "description": "Find Claude Code, Codex, and OpenCode chats or ask questions about their contents.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "fstandhartinger",
   "license": "MIT",
   "engines": {
@@ -136,7 +136,7 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "package": "vsce package --target linux-x64",
-    "lint": "node --check src/extension.js && node --check src/indexer.js && node --check src/search.js && node --check src/webview.js && node --check src/summaries.js && node --check src/presentation.js && node --check src/question-search.js"
+    "lint": "node --check src/extension.js && node --check src/indexer.js && node --check src/search.js && node --check src/webview.js && node --check src/summaries.js && node --check src/presentation.js && node --check src/question-search.js && node --check src/approaches.js"
   },
   "dependencies": {
     "@receptron/laya": "^0.1.1"

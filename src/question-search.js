@@ -323,6 +323,13 @@ function excerptAround(text, position, model, budget) {
   while (end > position + 100 && model.encode(text.slice(start, end)).length > budget) end -= 50;
   return text.slice(start, end);
 }
+function literalWindow(text, query, model, budget) {
+  let excerpt = focusWindow(text, query, 1200);
+  while (model.encode(excerpt).length > budget && excerpt.length > 1) {
+    excerpt = focusWindow(excerpt, query, Math.max(1, Math.floor(excerpt.length * 0.75)));
+  }
+  return excerpt;
+}
 async function* literalOriginalChunks(records, groups, query, model, budget, signal, roots = [], onRead = () => {}) {
   const words = terms(query);
   if (!words.length) return;
@@ -351,7 +358,7 @@ async function* literalOriginalChunks(records, groups, query, model, budget, sig
       const content = fullContent(d);
       if (hasWords(content)) {
         const local = localPinAnswer(query, content);
-        const excerpt = local ? excerptAround(content, local.position, model, budget) : focusWindow(content, query, 1200);
+        const excerpt = local ? excerptAround(content, local.position, model, budget) : literalWindow(content, query, model, budget);
         yield { group, text: excerpt, line: group.records.find(r => r.path === file)?.line || 1, local };
       }
       return;
@@ -369,7 +376,7 @@ async function* literalOriginalChunks(records, groups, query, model, budget, sig
         if (!entry?.text) continue;
         if (!hasWords(entry.text)) continue;
         const local = localPinAnswer(query, entry.text);
-        const excerpt = local ? excerptAround(entry.text, local.position, model, budget) : focusWindow(entry.text, query, 1200);
+        const excerpt = local ? excerptAround(entry.text, local.position, model, budget) : literalWindow(entry.text, query, model, budget);
         yield { group, text: excerpt, line, local };
       }
     } finally { lines.close(); stream.destroy(); }
@@ -488,12 +495,14 @@ async function extractAnswer(query, excerpt, providers, signal, fetcher = fetch)
 }
 
 async function scanQuestions(groups, query, model, providers, signal, onProgress, onResult, extractor = extractAnswer, options = {}) {
-  const budget = chunkBudget(model, query);
+  const strategy = ['literal', 'quick', 'full'].includes(options.strategy) ? options.strategy : 'full';
+  const searchModel = model || { encode: value => [...value] };
+  const budget = model ? chunkBudget(model, query) : 1200;
   let chats = 0, chunks = 0, quickChunks = 0, literalChunks = 0, found = 0, pending = 0, phase = 'literal';
-  let answerProviders = /\b(?:pin|passcode|password|otp|secret)\b/i.test(query) ? [] : providers;
+  let answerProviders = strategy === 'literal' || /\b(?:pin|passcode|password|otp|secret)\b/i.test(query) ? [] : providers;
   const seenCitations = new Set(), seenChunks = new Set();
   const queued = [], running = new Set();
-  const progress = extra => onProgress({ phase, chats, totalChats: groups.length, chunks, quickChunks, literalChunks, found, pending, ...extra });
+  const progress = extra => onProgress({ strategy, phase, chats, totalChats: groups.length, chunks, quickChunks, literalChunks, found, pending, ...extra });
   async function finishCandidate(task) {
     const { group, excerpt, id } = task;
     try {
@@ -550,6 +559,12 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
       progress();
       return true;
     }
+    if (strategy === 'literal' && pass === 'literal') {
+      found++;
+      await onResult({ mode: 'question', key: group.key, source: group.source, session: group.session, title: group.title, time: group.time, line, chunk: excerpt, verification: 'literal' });
+      progress();
+      return;
+    }
     const judgment = await model.systemOne(excerpt, { answer: evidenceQuestion(query) });
     if (signal?.aborted) return;
     if ((judgment.answers?.answer?.noul || 0) >= 0.78) {
@@ -573,9 +588,14 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
     progress();
     const literalCandidates = [];
     let localFound = false;
-    for await (const candidate of literalOriginalChunks(options.records, groups, query, model, budget, signal, options.roots,
+    for await (const candidate of literalOriginalChunks(options.records, groups, query, searchModel, budget, signal, options.roots,
       (file, line) => progress({ reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
       if (signal?.aborted) break;
+      if (strategy === 'literal') {
+        await consider(candidate.group, candidate.text, candidate.line, 'literal', candidate.local);
+        if (found >= 100) { progress({ limitReached: true }); break; }
+        continue;
+      }
       if (candidate.local && await consider(candidate.group, candidate.text, candidate.line, 'literal', candidate.local)) { localFound = true; continue; }
       if (literalCandidates.length < 8) literalCandidates.push(candidate);
     }
@@ -588,15 +608,16 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
     if (!options.records?.length || signal?.aborted) return;
     phase = 'quick';
     progress();
-    for await (const candidate of likelyOriginalChunks(options.records, groups, query, model, budget, signal,
+    for await (const candidate of likelyOriginalChunks(options.records, groups, query, searchModel, budget, signal,
       (file, line) => progress({ reading: `${path.basename(file)} · line ${line.toLocaleString()}` }))) {
       if (signal?.aborted) break;
       await consider(candidate.group, candidate.text, candidate.line, 'quick');
     }
   }
-  if (/\b(?:pin|passcode|password|otp|secret)\b/i.test(query)) { await runLiteral(); await runQuick(); }
+  if (strategy === 'literal') await runLiteral();
+  else if (/\b(?:pin|passcode|password|otp|secret)\b/i.test(query)) { await runLiteral(); await runQuick(); }
   else { await runQuick(); await runLiteral(); }
-  for (const group of groups) {
+  for (const group of strategy === 'full' ? groups : []) {
     if (signal?.aborted) break;
     try {
       phase = 'full';
@@ -616,7 +637,7 @@ async function scanQuestions(groups, query, model, providers, signal, onProgress
     for (const task of queued.splice(0)) { pending--; await options.onRemove?.(task.id); }
   }
   while (running.size) await Promise.all([...running]);
-  phase = 'full';
+  phase = strategy === 'full' ? 'full' : strategy;
   progress({ done: !signal?.aborted });
   return { chats, chunks, quickChunks, literalChunks, found };
 }
